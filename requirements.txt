@@ -1,0 +1,9 @@
+tensorflow
+numpy
+pandas
+polars
+pyarrow
+av
+pillow
+matplotlib
+huggingface_hub
