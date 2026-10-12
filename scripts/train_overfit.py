@@ -7,7 +7,7 @@ from PIL import Image
 from tensorflow import keras
 
 from models.data import load_episode_triplets
-from models.simple_world.swm import build_actor_world_model   # check: folder name
+from models.simple_world_model.swm import build_actor_world_model   # check: folder name
 
 # --- 0: configuration, the ONLY place where settings live ---
 CONFIG = dict(episode=0, epochs=300, batch_size=16, lr=3e-4, img_size=224,
