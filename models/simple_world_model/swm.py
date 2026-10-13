@@ -8,7 +8,6 @@ ACTION_DIM = 16    # CHANGED: was 4
 LANG_DIM = 512
 LATENT_DIM = 512   # NEW: size of the bottleneck
 
-
 def build_actor_world_model(img_h=IMG_H, img_w=IMG_W, state_dim=STATE_DIM,
                             action_dim=ACTION_DIM, lang_dim=LANG_DIM,
                             latent_dim=LATENT_DIM):
@@ -38,11 +37,15 @@ def build_actor_world_model(img_h=IMG_H, img_w=IMG_W, state_dim=STATE_DIM,
     s_x = layers.Dense(128, activation="relu")(wm_features)
     next_state_output = layers.Dense(state_dim, name="next_state_output")(s_x)
 
-    # In the original model, the first decoder layer has about 2.5 billion parameters, which needs roughly 40 GB of memory to train. 
-    # With the bottleneck, the same branch has about 52 million.
-    z = layers.Dense(latent_dim, activation="relu", name="latent")(wm_features)
-    
-    dec = layers.Dense(feat_h * feat_w * 256, activation="relu")(z)            # CHANGED: input z
+    # latent_dim=None -> original decoder: the big Dense reads wm_features directly
+    #   (~2.5 billion weights, ~40 GB GPU memory to train).
+    # latent_dim=512  -> bottleneck z first (~52 million weights in this part).
+    if latent_dim is None:
+        dec_in = wm_features
+    else:
+        dec_in = layers.Dense(latent_dim, activation="relu", name="latent")(wm_features)
+
+    dec = layers.Dense(feat_h * feat_w * 256, activation="relu")(dec_in)
     dec = layers.Reshape((feat_h, feat_w, 256))(dec)
     dec = layers.Conv2DTranspose(128, 3, strides=2, padding="same", activation="relu")(dec)
     dec = layers.Conv2DTranspose(64, 3, strides=2, padding="same", activation="relu")(dec)
@@ -55,3 +58,4 @@ def build_actor_world_model(img_h=IMG_H, img_w=IMG_W, state_dim=STATE_DIM,
         inputs=[image_input, state_input, language_input, action_input],
         outputs=[action_output, next_state_output, next_image_output],
         name="actor_world_model")
+

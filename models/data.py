@@ -74,3 +74,9 @@ def load_episode_triplets(episode, root=ROOT):
         "next_image_output": images[1:],     # world model: frame t+1
     }
     return inputs, targets
+
+def load_instruction(episode, root=ROOT):
+    info = load_info(root)
+    chunk = episode // info["chunks_size"]
+    path = root / info["data_path"].format(episode_chunk=chunk, episode_index=episode)
+    return str(pd.read_parquet(path, columns=["instruction.text"])["instruction.text"].iloc[0])
