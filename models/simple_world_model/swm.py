@@ -2,6 +2,8 @@
 from tensorflow import keras
 from tensorflow.keras import layers
 
+from models.encoders import build_encoder
+
 IMG_H, IMG_W = 224, 224
 STATE_DIM = 16     # CHANGED: was 7  (2 arms x (xyz + quaternion + jaw))
 ACTION_DIM = 16    # CHANGED: was 4
@@ -10,20 +12,18 @@ LATENT_DIM = 512   # NEW: size of the bottleneck
 
 def build_actor_world_model(img_h=IMG_H, img_w=IMG_W, state_dim=STATE_DIM,
                             action_dim=ACTION_DIM, lang_dim=LANG_DIM,
-                            latent_dim=LATENT_DIM):
+                            latent_dim=LATENT_DIM, encoder="simple_cnn",
+                            freeze_encoder=False, unfreeze_last_n=0):
     # --- A: inputs ---
     image_input = keras.Input(shape=(img_h, img_w, 3), name="image_input")
     state_input = keras.Input(shape=(state_dim,), name="state_input")
     language_input = keras.Input(shape=(lang_dim,), name="language_input")
     action_input = keras.Input(shape=(action_dim,), name="action_input")
 
-    # --- B: visual encoder (unchanged) ---
-    x = layers.Conv2D(32, 3, strides=2, padding="same", activation="relu")(image_input)
-    x = layers.Conv2D(64, 3, strides=2, padding="same", activation="relu")(x)
-    x = layers.Conv2D(128, 3, strides=2, padding="same", activation="relu")(x)
-    x = layers.Conv2D(256, 3, strides=2, padding="same", activation="relu")(x)
+    # --- B: visual encoder (CHANGED: chosen by name; "simple_cnn" = the original 4 convs) ---
+    encoded_img = build_encoder(encoder, image_input, freeze_encoder, unfreeze_last_n)
     feat_h, feat_w = img_h // 16, img_w // 16          # CHANGED: computed, not hard-coded 14
-    encoded_img = layers.Flatten()(x)
+                                                       # (decoder start: 4 x2 upsamplings back to img size)
 
     # --- C: actor branch (sizes only) ---
     actor_features = layers.Concatenate()([encoded_img, state_input, language_input])

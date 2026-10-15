@@ -7,3 +7,5 @@ av
 pillow
 matplotlib
 huggingface_hub
+wandb
+opencv-python
