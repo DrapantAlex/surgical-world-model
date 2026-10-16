@@ -1,4 +1,8 @@
-"""Step 4: overfit the actor-world model on one Open-H episode."""
+"""Step 4: overfit the actor-world model on one Open-H episode.
+
+  python -m scripts.train_overfit [--dataset-root data/open_h/Surgical/jhu/imerse/star_il/star_il]
+"""
+import argparse
 from pathlib import Path
 
 import numpy as np
@@ -6,12 +10,14 @@ import wandb
 from PIL import Image
 from tensorflow import keras
 
-from models.data import load_episode_triplets, load_instruction            
+from models.data import ROOT, feature_dims, load_episode_triplets, load_instruction
 from models.simple_world_model.swm import build_actor_world_model
 from models.visualization import WorldModelTimelineCallback
 
-# --- 0: configuration, the ONLY place where settings live ---
-CONFIG = dict(episode=0, epochs=300, batch_size=16, lr=3e-4, img_size=224,
+# --- 0: configuration, the ONLY place where settings live (+ the dataset, from the CLI) ---
+parser = argparse.ArgumentParser()
+parser.add_argument("--dataset-root", default=ROOT.as_posix(), help="default: tissue lift")
+CONFIG = dict(dataset_root=parser.parse_args().dataset_root, episode=0, epochs=300, batch_size=16, lr=3e-4, img_size=224,
               latent_dim=None, seed=0,
               w_action=1.0, w_state=1.0, w_image=0.1)
 run = wandb.init(project="surgical-world-model",
@@ -23,7 +29,8 @@ OUT.mkdir(parents=True, exist_ok=True)
 LOG_DIR = Path("logs") / run.name            
 
 # --- A: data ---
-inputs, targets = load_episode_triplets(CONFIG["episode"])
+ROOT_DIR = Path(CONFIG["dataset_root"])
+inputs, targets = load_episode_triplets(CONFIG["episode"], ROOT_DIR)
 
 # --- B: the copy baseline ---
 copy_mse = float(np.mean((inputs["image_input"] - targets["next_image_output"]) ** 2))
@@ -31,7 +38,7 @@ run.summary["copy_baseline_image_mse"] = copy_mse
 print(f"copy baseline image MSE: {copy_mse:.6f}")
 
 # --- C: model and losses ---
-model = build_actor_world_model(latent_dim=CONFIG["latent_dim"])
+model = build_actor_world_model(*feature_dims(ROOT_DIR), latent_dim=CONFIG["latent_dim"])
 model.compile(
     optimizer=keras.optimizers.Adam(learning_rate=CONFIG["lr"]),
     loss={"action_output": keras.losses.Huber(),
@@ -48,7 +55,7 @@ class WandbEpochLogger(keras.callbacks.Callback):
         run.log({k: float(v) for k, v in (logs or {}).items()}, step=epoch)
 
 timeline_cb = WorldModelTimelineCallback(                                  
-    LOG_DIR, inputs, targets, load_instruction(CONFIG["episode"]), wandb_run=run,
+    LOG_DIR, inputs, targets, load_instruction(CONFIG["episode"], ROOT_DIR), wandb_run=run,
     num_frames=8, start=0, stride=1)
 
 history = model.fit(inputs, targets, epochs=CONFIG["epochs"],

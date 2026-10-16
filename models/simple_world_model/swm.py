@@ -5,13 +5,11 @@ from tensorflow.keras import layers
 from models.encoders import build_encoder
 
 IMG_H, IMG_W = 224, 224
-STATE_DIM = 16     # CHANGED: was 7  (2 arms x (xyz + quaternion + jaw))
-ACTION_DIM = 16    # CHANGED: was 4
 LANG_DIM = 512
 LATENT_DIM = 512   # NEW: size of the bottleneck
 
-def build_actor_world_model(img_h=IMG_H, img_w=IMG_W, state_dim=STATE_DIM,
-                            action_dim=ACTION_DIM, lang_dim=LANG_DIM,
+# CHANGED: state_dim / action_dim have no default; pass data.feature_dims(root)
+def build_actor_world_model(state_dim, action_dim, img_h=IMG_H, img_w=IMG_W, lang_dim=LANG_DIM,
                             latent_dim=LATENT_DIM, encoder="simple_cnn",
                             freeze_encoder=False, unfreeze_last_n=0):
     # --- A: inputs ---

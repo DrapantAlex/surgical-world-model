@@ -26,6 +26,11 @@ def get_split_episodes(split, root=ROOT):
     start, stop = load_info(root)["splits"][split].split(":")
     return list(range(int(start), int(stop)))
 
+def feature_dims(root=ROOT):
+    """(state_dim, action_dim), read from info.json instead of hard-coding them."""
+    features = load_info(root)["features"]
+    return features["observation.state"]["shape"][0], features["action"]["shape"][0]
+
 def load_episode_lengths(root=ROOT):
     """Number of frames per episode, from meta/episodes.jsonl."""
     lengths = {}
@@ -37,11 +42,13 @@ def load_episode_lengths(root=ROOT):
 
 
 # --- B: the table (state and action) ---
-def load_table(episode, root=ROOT):
+def table_path(episode, root=ROOT):
     info = load_info(root)
     chunk = episode // info["chunks_size"]
-    path = root / info["data_path"].format(episode_chunk=chunk, episode_index=episode)
-    df = pd.read_parquet(path)
+    return root / info["data_path"].format(episode_chunk=chunk, episode_index=episode)
+
+def load_table(episode, root=ROOT):
+    df = pd.read_parquet(table_path(episode, root))
     states = np.stack(df["observation.state"].to_numpy()).astype(np.float32)
     actions = np.stack(df["action"].to_numpy()).astype(np.float32)
     return states, actions
@@ -53,6 +60,16 @@ def video_path(episode, camera=CAMERA, root=ROOT):
     chunk = episode // info["chunks_size"]
     return root / info["video_path"].format(
         episode_chunk=chunk, video_key=camera, episode_index=episode)
+
+def drop_missing_videos(split, episodes, camera=CAMERA, root=ROOT, verbose=True):
+    """Keep only the episodes that have a video file for `camera`.
+    Returns (kept, skipped); prints how many were dropped from the split."""
+    kept = [ep for ep in episodes if video_path(ep, camera, root).exists()]
+    skipped = sorted(set(episodes) - set(kept))
+    if verbose:
+        print(f"{split}: dropped {len(skipped)} of {len(episodes)} episodes "
+              f"(no {camera} video){': ' + str(skipped) if skipped else ''}")
+    return kept, skipped
 
 def load_frames(episode, camera=CAMERA, size=IMG_SIZE, root=ROOT):
     path = video_path(episode, camera, root)
@@ -76,7 +93,13 @@ def unnormalise(x, stats, key):
 
 def compute_norm_stats(episodes, root=ROOT):
     """Mean/std of state and action over the given (training) episodes only.
-    Same layout as stats.json, so normalise() works with it."""
+    Same layout as stats.json, so normalise() works with it.
+    Raises (never falls back) if any episode's table is missing."""
+    missing = [ep for ep in episodes if not table_path(ep, root).exists()]
+    if not episodes or missing:
+        raise FileNotFoundError(
+            f"cannot compute normalisation stats for {root}: {len(missing)} of "
+            f"{len(episodes)} episodes have no parquet file (first: {missing[:10]})")
     states, actions = zip(*(load_table(ep, root) for ep in episodes))
     stats = {}
     for key, x in [("observation.state", np.concatenate(states)),
@@ -94,13 +117,22 @@ def load_norm_stats(path):
 
 
 # --- E: triplets ---
-def load_episode_triplets(episode, root=ROOT):
+def load_episode_triplets(episode, root=ROOT, stats=None):
+    """One episode as triplets. Stats: the given ones, else meta/stats.json, else
+    (single-episode scripts only) computed from this episode, with a warning."""
+    if not video_path(episode, CAMERA, root).exists():
+        raise FileNotFoundError(f"episode {episode} has no {CAMERA} video in {root}")
     states, actions = load_table(episode, root)
     frames = load_frames(episode, root=root)
     assert len(frames) == len(states), (
         f"episode {episode}: {len(frames)} frames vs {len(states)} rows")
 
-    stats = load_stats(root)
+    if stats is None and (root / "meta" / "stats.json").exists():
+        stats = load_stats(root)
+    elif stats is None:
+        print(f"WARNING: {root}/meta/stats.json not found: normalising episode {episode} "
+              f"with ITS OWN mean/std. Fine for shape checks and overfitting, not for training.")
+        stats = compute_norm_stats([episode], root)
     states = normalise(states, stats, "observation.state")
     actions = normalise(actions, stats, "action")
     images = frames.astype(np.float32) / 255.0
@@ -120,9 +152,7 @@ def load_episode_triplets(episode, root=ROOT):
     return inputs, targets
 
 def load_instruction(episode, root=ROOT):
-    info = load_info(root)
-    chunk = episode // info["chunks_size"]
-    path = root / info["data_path"].format(episode_chunk=chunk, episode_index=episode)
+    path = table_path(episode, root)
     return str(pd.read_parquet(path, columns=["instruction.text"])["instruction.text"].iloc[0])
 
 
@@ -185,6 +215,7 @@ def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episo
     t+1 is in the same episode, so a pair never crosses an episode boundary.
     If `stats` is None, they are computed on the training split.
     `episodes` optionally restricts the split to a subset (e.g. for quick checks).
+    Episodes without a video for `camera` are skipped (listed in "skipped_episodes").
     Full splits read their frames from the memory-mapped cache (built on first use);
     subsets decode their videos directly and never touch the cache.
     """
@@ -192,8 +223,11 @@ def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episo
     from_cache = use_cache and episodes is None
     if episodes is None:
         episodes = get_split_episodes(split, root)
+    episodes, skipped = drop_missing_videos(split, episodes, camera, root)
     if stats is None:
-        stats = compute_norm_stats(get_split_episodes("train", root), root)
+        train_eps, _ = drop_missing_videos("train", get_split_episodes("train", root),
+                                           camera, root, verbose=False)
+        stats = compute_norm_stats(train_eps, root)
 
     # allocate once, so all frames never exist twice in memory
     lengths = load_episode_lengths(root)
@@ -202,8 +236,9 @@ def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episo
         frames = cached_frames(split, episodes, camera, size, root, cache_dir)
     else:
         frames = np.empty((N, size, size, 3), np.uint8)
-    states = np.empty((N, 16), np.float32)
-    actions = np.empty((N, 16), np.float32)
+    state_dim, action_dim = feature_dims(root)
+    states = np.empty((N, state_dim), np.float32)
+    actions = np.empty((N, action_dim), np.float32)
     episode_index = np.empty(N, np.int64)
     pair_index = []
 
@@ -224,10 +259,11 @@ def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episo
 
     return {
         "frames": frames,                 # (N, size, size, 3) uint8
-        "states": states,                 # (N, 16) normalised
-        "actions": actions,               # (N, 16) normalised
+        "states": states,                 # (N, state_dim) normalised
+        "actions": actions,               # (N, action_dim) normalised
         "episode_index": episode_index,   # (N,) which episode each frame is from
         "pair_index": np.concatenate(pair_index),  # (P,) valid t, with t+1 = t + 1
+        "skipped_episodes": skipped,      # episodes dropped: no video for `camera`
         "stats": stats,
     }
 

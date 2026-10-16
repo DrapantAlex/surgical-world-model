@@ -13,12 +13,26 @@ import pandas as pd
 
 from models.data import unnormalise
 
-# --- A: units and layout of the 16-D state / action vectors ---
+# --- A: units and layout of the 16-D state / action vectors (tissue lift ONLY) ---
 POSITION_TO_MM = 1000.0          # ASSUMPTION: positions in the dataset are in metres
 HUBER_DELTA = 1.0                # default of keras.losses.Huber(), used in training
 ARMS = {"psm1": 0, "psm2": 8}    # where each arm starts in the 16-D vector
 POS, QUAT, JAW = slice(0, 3), slice(3, 7), 7   # inside one arm: [x y z | qx qy qz qw | jaw]
 RESULTS_CSV = Path("outputs/results.csv")
+TISSUE_LIFT = "srt_tissue_lift"  # the only dataset whose layout is known (see ARMS)
+
+# Core metrics: normalised units, the SAME names for every dataset (logs, TensorBoard,
+# results.csv). Physical errors are extras, under EXTRA, and exist for tissue lift only.
+CORE_METRICS = ("action_mse", "action_huber", "next_state_mse", "next_image_mse")
+EXTRA = "extra/"
+
+
+# TODO: replace with an explicit per-dataset layout config (which slices are
+# position / quaternion / jaw, per arm), instead of recognising tissue lift by name.
+def has_tissue_lift_layout(root):
+    """True only for tissue lift, the one dataset whose ARMS / POS / QUAT / JAW
+    layout is known: only then are the physical "extra/" metrics computed."""
+    return Path(root).name == TISSUE_LIFT
 
 
 # --- B: errors in normalised units (the same formulas as the training losses) ---
@@ -64,26 +78,32 @@ def physical_errors(pred_raw, true_raw, prefix):
                   "rot_deg": quaternion_angle_deg(p[:, QUAT], t[:, QUAT]),
                   "jaw_raw": np.abs(p[:, JAW] - t[:, JAW])}
         for name, e in errors.items():
-            out[f"{prefix}_{name}_{arm}"] = float(e.mean())
+            out[f"{EXTRA}{prefix}_{name}_{arm}"] = float(e.mean())
             per_arm[name].append(e)
     for name, es in per_arm.items():
-        out[f"{prefix}_{name}"] = float(np.concatenate(es).mean())
+        out[f"{EXTRA}{prefix}_{name}"] = float(np.concatenate(es).mean())
     return out
 
 
-# --- D: one function per model output ---
-def action_metrics(pred, true, stats):
-    m = {"action_huber": huber(pred, true), "action_mse": mse(pred, true)}
-    m.update(physical_errors(unnormalise(pred, stats, "action"),
-                             unnormalise(true, stats, "action"), "action"))
+# --- D: one function per model output (core always; "extra/" only if physical) ---
+def action_metrics(pred, true, stats, physical):
+    m = {"action_mse": mse(pred, true), "action_huber": huber(pred, true)}
+    if physical:
+        m.update(physical_errors(unnormalise(pred, stats, "action"),
+                                 unnormalise(true, stats, "action"), "action"))
     return m
 
-def next_state_metrics(pred, true, stats):
+def next_state_metrics(pred, true, stats, physical):
     key = "observation.state"
     m = {"next_state_mse": mse(pred, true)}
-    m.update(physical_errors(unnormalise(pred, stats, key),
-                             unnormalise(true, stats, key), "next_state"))
+    if physical:
+        m.update(physical_errors(unnormalise(pred, stats, key),
+                                 unnormalise(true, stats, key), "next_state"))
     return m
+
+def next_image_metrics(image_mse):
+    """image_mse: a finished ImageMSE accumulator."""
+    return {"next_image_mse": image_mse.result()}
 
 
 # --- E: reporting ---
