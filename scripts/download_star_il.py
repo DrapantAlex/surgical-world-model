@@ -25,7 +25,7 @@ def build_patterns(full: bool):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--full", action="store_true", help="download all 512 episodes")
-    parser.add_argument("--local-dir", default="data/open-h")
+    parser.add_argument("--local-dir", default="data/open_h")
     args = parser.parse_args()
 
     snapshot_download(repo_id=REPO_ID, repo_type="dataset",
