@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(nvidia-smi*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(python -m scripts.train --run-name smoke*)",
+      "Bash(python -m scripts.baselines --max-episodes*)"
+    ],
+    "ask": [
+      "Bash(git commit*)",
+      "Bash(git push*)",
+      "Bash(python -m scripts.download*)"
+    ],
+    "deny": [
+        "Read(./data/**/*.mp4)",
+        "Read(./data/**/*.npy)",
+        "Read(./data/**/*.parquet)",
+        "Read(./outputs/**/*.h5)",
+        "Bash(rm -rf*)"
+]
+  }
+}
