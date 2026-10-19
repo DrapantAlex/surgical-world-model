@@ -4,3 +4,23 @@ outputs/
 __pycache__/
 wandb/
 logs/
+
+# model weights / checkpoints anywhere
+*.h5
+*.keras
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+checkpoints/
+
+# logs anywhere
+*.log
+events.out.tfevents.*
+
+# local Claude Code settings
+.claude/settings.local.json
+
+# secrets
+.env
