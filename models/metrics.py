@@ -25,6 +25,7 @@ TISSUE_LIFT = "srt_tissue_lift"  # the only dataset whose layout is known (see A
 # results.csv). Physical errors are extras, under EXTRA, and exist for tissue lift only.
 CORE_METRICS = ("action_mse", "action_huber", "next_state_mse", "next_image_mse")
 EXTRA = "extra/"
+PER_DIM = "per_dim/"   # one MSE per vector dimension, named from info.json (every dataset)
 
 
 # TODO: replace with an explicit per-dataset layout config (which slices are
@@ -44,6 +45,12 @@ def huber(pred, true, delta=HUBER_DELTA):
 
 def mse(pred, true):
     return float(np.mean((np.asarray(pred, np.float64) - true) ** 2))
+
+def per_dim_mse(pred, true, names, prefix):
+    """MSE of each dimension separately: {"per_dim/<prefix>_mse/<name>": value}.
+    In normalised units ~1.0 = no better than the train mean for that dimension."""
+    err = np.mean((np.asarray(pred, np.float64) - true) ** 2, axis=0)   # (D,): mean over samples
+    return {f"{PER_DIM}{prefix}_mse/{name}": float(e) for name, e in zip(names, err)}
 
 class ImageMSE:
     """Image MSE added up batch by batch, so a whole split never exists as float."""
@@ -86,16 +93,20 @@ def physical_errors(pred_raw, true_raw, prefix):
 
 
 # --- D: one function per model output (core always; "extra/" only if physical) ---
-def action_metrics(pred, true, stats, physical):
+def action_metrics(pred, true, stats, physical, names):
+    """names: the action dimension names (data.feature_names), for the per_dim/ metrics."""
     m = {"action_mse": mse(pred, true), "action_huber": huber(pred, true)}
+    m.update(per_dim_mse(pred, true, names, "action"))
     if physical:
         m.update(physical_errors(unnormalise(pred, stats, "action"),
                                  unnormalise(true, stats, "action"), "action"))
     return m
 
-def next_state_metrics(pred, true, stats, physical):
+def next_state_metrics(pred, true, stats, physical, names):
+    """names: the state dimension names (data.feature_names), for the per_dim/ metrics."""
     key = "observation.state"
     m = {"next_state_mse": mse(pred, true)}
+    m.update(per_dim_mse(pred, true, names, "next_state"))
     if physical:
         m.update(physical_errors(unnormalise(pred, stats, key),
                                  unnormalise(true, stats, key), "next_state"))

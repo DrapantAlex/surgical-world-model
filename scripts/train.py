@@ -34,7 +34,6 @@ LOSS_WEIGHTS = {"action_output": 1.0, "next_state_output": 1.0, "next_image_outp
 MONITOR = "val_action_output_loss"     # best checkpoint and early stopping
 WANDB_PROJECT = "surgical-world-model"
 OUTPUTS, LOGS = Path("outputs"), Path("logs")
-BASELINES_JSON = OUTPUTS / "baselines" / "baselines.json"
 
 
 # --- A: command line ---
@@ -57,6 +56,9 @@ def parse_args():
                    help="with --freeze-encoder: train the last N backbone layers again")
     p.add_argument("--max-episodes", type=int,
                    help="only the first N train and N val episodes (smoke test)")
+    p.add_argument("--canonical-quaternion", action="store_true",
+                   help="flip every quaternion label to the sign of the train mean rotation "
+                        "(saved as quat_reference.json); off = the dataset's own signs")
     p.add_argument("--vis-every", type=int, default=5, help="timeline image every N epochs")
     p.add_argument("--wandb-mode", choices=["online", "offline", "disabled"], default="online")
     p.add_argument("--deterministic", action="store_true", help="deterministic TF ops (slower)")
@@ -79,6 +81,17 @@ def freeze_label(cfg):
 def dataset_root(cfg):
     """Runs saved before --dataset-root existed were all tissue lift."""
     return Path(cfg.get("dataset_root", data.ROOT))
+
+def run_quat_ref(cfg, out):
+    """The run's saved reference rotations, or None (runs before the option: raw signs)."""
+    if not cfg.get("canonical_quaternion", False):
+        return None
+    return data.load_quat_reference(out / "quat_reference.json")
+
+def baselines_json(canonical):
+    """Baselines measured with the same quaternion convention as the run: normalised
+    MSE is not comparable across conventions (different label std)."""
+    return OUTPUTS / ("baselines_canonical" if canonical else "baselines") / "baselines.json"
 
 def episodes_for(split, max_episodes, root):
     """None = the whole split (read from the frame cache); else its first N episodes."""
@@ -107,18 +120,22 @@ def evaluate(model, val, stats, batch_size, root):
         image.update(img.numpy(), targets["next_image_output"].numpy())
     t = val["pair_index"]
     physical = metrics.has_tissue_lift_layout(root)   # else core metrics only, no "extra/"
-    m = metrics.action_metrics(np.concatenate(pred_action), val["actions"][t], stats, physical)
+    state_names, action_names = data.feature_names(root)
+    m = metrics.action_metrics(np.concatenate(pred_action), val["actions"][t], stats, physical,
+                               action_names)
     m.update(metrics.next_state_metrics(np.concatenate(pred_state), val["states"][t + 1], stats,
-                                        physical))
+                                        physical, state_names))
     m.update(metrics.next_image_metrics(image))
     return m
 
-def comparison_table(model_name, model_metrics, root):
+def comparison_table(model_name, model_metrics, root, canonical=False):
     """The model's metrics next to the baselines (if scripts/baselines.py has been run
-    on the same dataset; baselines.json files without "dataset_root" are tissue lift)."""
+    on the same dataset and quaternion convention; baselines.json files without
+    "dataset_root" are tissue lift)."""
     columns = {model_name: model_metrics}
-    if BASELINES_JSON.exists():
-        baselines = json.loads(BASELINES_JSON.read_text())
+    path = baselines_json(canonical)
+    if path.exists():
+        baselines = json.loads(path.read_text())
         if Path(baselines.get("dataset_root", data.ROOT)) == Path(root):
             columns.update(baselines["results"])
     return metrics.format_table(columns)
@@ -196,11 +213,17 @@ def train(args):
     root = Path(args.dataset_root)
     train_eps, _ = data.drop_missing_videos("train", data.get_split_episodes("train", root),
                                             root=root, verbose=False)
-    stats = data.compute_norm_stats(train_eps, root)
+    # optional canonical quaternion signs: reference from the full train split, saved
+    # with the run, and used for the stats AND both splits (all through load_table)
+    quat_ref = None
+    if args.canonical_quaternion:
+        quat_ref = data.compute_quat_reference(train_eps, root)
+        data.save_quat_reference(quat_ref, out / "quat_reference.json")
+    stats = data.compute_norm_stats(train_eps, root, quat_ref)
     data.save_norm_stats(stats, out / "norm_stats.json")
-    train_split = data.load_split("train", root=root, stats=stats,
+    train_split = data.load_split("train", root=root, stats=stats, quat_ref=quat_ref,
                                   episodes=episodes_for("train", args.max_episodes, root))
-    val = data.load_split("val", root=root, stats=stats,
+    val = data.load_split("val", root=root, stats=stats, quat_ref=quat_ref,
                           episodes=episodes_for("val", args.max_episodes, root))
     train_ds = make_dataset(train_split, args.batch_size, shuffle=True, seed=args.seed)
     val_ds = make_dataset(val, args.batch_size, shuffle=False)
@@ -258,10 +281,11 @@ def train(args):
 
     print(f"\nbest epoch {cfg['best_epoch']} of {cfg['epochs_run']}, "
           f"training {train_time_min:.1f} min\n")
-    print(comparison_table(run_name, val_metrics, root))
+    print(comparison_table(run_name, val_metrics, root, args.canonical_quaternion))
     if args.max_episodes is None:
         metrics.append_results({"run_name": run_name, "dataset": root.name,
                                 "encoder": args.encoder,
+                                "canonical_quaternion": args.canonical_quaternion,
                                 "freeze": cfg["freeze"], "seed": args.seed,
                                 "latent_dim": args.latent_dim, "epochs": cfg["epochs_run"],
                                 "best_epoch": cfg["best_epoch"],
@@ -278,13 +302,14 @@ def eval_only(args):
     cfg = json.loads((out / "config.json").read_text())
     stats = data.load_norm_stats(out / "norm_stats.json")
     root = dataset_root(cfg)
-    val = data.load_split("val", root=root, stats=stats,
+    quat_ref = run_quat_ref(cfg, out)
+    val = data.load_split("val", root=root, stats=stats, quat_ref=quat_ref,
                           episodes=episodes_for("val", cfg["max_episodes"], root))
     model = build_model(cfg)
     model.load_weights(str(out / "best.weights.h5"))
     val_metrics = evaluate(model, val, stats, cfg["batch_size"], root)
     save_json(val_metrics, out / "val_metrics_reeval.json")
-    print(comparison_table(f"{args.run_name} (re-eval)", val_metrics, root))
+    print(comparison_table(f"{args.run_name} (re-eval)", val_metrics, root, quat_ref is not None))
 
     saved = out / "val_metrics.json"
     if saved.exists():

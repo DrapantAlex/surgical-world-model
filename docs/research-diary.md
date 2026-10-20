@@ -211,3 +211,39 @@ The pipeline is now dataset-agnostic:
 ### Running
 
 `star-il-simplecnn-latent512-seed0` on the DGX (GPU 3, tmux `swm`), with the same hyperparameters as tissue lift.
+
+---
+
+## 2026-10-19
+
+### Setup
+
+I connected VS Code to my repository on the DGX via the **Remote-SSH** extension, so I can work on the cluster files directly from VS Code.
+I installed **Claude Code** in the repository and configured its settings files and `CLAUDE.md`, so that it can work on the repository following my conventions.
+
+### Results of the first STAR-IL run
+
+Run: `star-il-simplecnn-latent512-seed0` — **now my reference baseline**.
+
+| Val metric     | Model | Baseline                |
+|----------------|-------|-------------------------|
+| action MSE     | [x]   | 1.008 (mean action)     |
+| next-state MSE | [x]   | 0.0002 (copy state)     |
+| next-image MSE | [x]   | 0.0006 (copy frame)     |
+
+1. **The actor learns, but generalises poorly.**
+   It is far better than the mean-action baseline. However, there is a large generalisation gap: after epoch 4, train action loss improves ~5× while val improves only ~10%, so the model mostly memorises the training episodes. The next-state head overfits for real (val loss rises after epoch 2).
+   Likely causes:
+   - only 409 demonstrations with nearly identical consecutive frames;
+   - a 72M-parameter model;
+   - no regularisation (no dropout, weight decay or augmentation).
+
+2. **The world-model heads are worse than the copy baselines.**
+   At 30 fps, consecutive frames and states are almost identical, so copying the input is already very accurate, while the model has to reconstruct the whole state and image.
+   A possible fix is to predict the change (Δstate, Δimage) instead of the absolute values. This addresses problem 2, not the overfitting.
+
+### Next steps
+
+- [ ] **Diagnostics:** train/val overlay plot, per-dimension action error, state-only baseline.
+- [ ] **First regularisation experiment:** weight decay (AdamW), compared against the reference run with everything else unchanged.
+- [ ] **Later:** image augmentation, and residual targets for the world model (to discuss with Michael).

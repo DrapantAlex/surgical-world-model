@@ -25,25 +25,34 @@ def parse_args():
                    help="LeRobot dataset folder (default: tissue lift)")
     p.add_argument("--max-episodes", type=int,
                    help="use only the first N validation episodes (smoke test)")
-    p.add_argument("--out", help="default: outputs/baselines (outputs/baselines_smoke with --max-episodes)")
+    p.add_argument("--canonical-quaternion", action="store_true",
+                   help="same quaternion signs as train.py --canonical-quaternion")
+    p.add_argument("--out", help="default: outputs/baselines, outputs/baselines_canonical with "
+                                 "--canonical-quaternion (outputs/baselines_smoke with --max-episodes)")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
     smoke = args.max_episodes is not None
-    out = Path(args.out or ("outputs/baselines_smoke" if smoke else "outputs/baselines"))
+    default = "outputs/baselines_canonical" if args.canonical_quaternion else "outputs/baselines"
+    out = Path(args.out or ("outputs/baselines_smoke" if smoke else default))
     out.mkdir(parents=True, exist_ok=True)
 
     # --- A: data: statistics from the TRAINING split, pairs from the VALIDATION split ---
     root = Path(args.dataset_root)
     physical = metrics.has_tissue_lift_layout(root)   # else core metrics only, no "extra/"
+    state_names, action_names = data.feature_names(root)
     train_eps, _ = data.drop_missing_videos("train", data.get_split_episodes("train", root),
                                             root=root, verbose=False)
-    stats = data.compute_norm_stats(train_eps, root)
+    quat_ref = None
+    if args.canonical_quaternion:   # the same reference as a training run would compute
+        quat_ref = data.compute_quat_reference(train_eps, root)
+        data.save_quat_reference(quat_ref, out / "quat_reference.json")
+    stats = data.compute_norm_stats(train_eps, root, quat_ref)
     data.save_norm_stats(stats, out / "norm_stats.json")
     episodes = data.get_split_episodes("val", root)[:args.max_episodes] if smoke else None
-    val = data.load_split("val", root=root, stats=stats, episodes=episodes)
+    val = data.load_split("val", root=root, stats=stats, episodes=episodes, quat_ref=quat_ref)
     t = val["pair_index"]
     state_t, state_t1, action_t = val["states"][t], val["states"][t + 1], val["actions"][t]
 
@@ -53,7 +62,7 @@ def main():
     # "mean action": always the training mean action (0 after normalisation)
     mean_action = data.normalise(np.asarray(stats["action"]["mean"], np.float32), stats, "action")
     results["mean_action"] = metrics.action_metrics(
-        np.broadcast_to(mean_action, action_t.shape), action_t, stats, physical)
+        np.broadcast_to(mean_action, action_t.shape), action_t, stats, physical, action_names)
 
     # "action = current state": state t, converted from state units to action units.
     # Only where state and action share one layout (tissue lift: both are poses).
@@ -61,12 +70,13 @@ def main():
         state_as_action = data.normalise(
             data.unnormalise(state_t, stats, "observation.state"), stats, "action")
         results["action_eq_state"] = metrics.action_metrics(state_as_action, action_t, stats,
-                                                            physical)
+                                                            physical, action_names)
     else:
         print("action_eq_state skipped: state and action have different layouts")
 
     # "copy state": state t+1 = state t
-    results["copy_state"] = metrics.next_state_metrics(state_t, state_t1, stats, physical)
+    results["copy_state"] = metrics.next_state_metrics(state_t, state_t1, stats, physical,
+                                                       state_names)
 
     # "copy frame": frame t+1 = frame t, through get_pairs = the model's own preprocessing
     image = metrics.ImageMSE()
@@ -81,6 +91,7 @@ def main():
     print(metrics.format_table(results))
     summary = {"split": "val",
                "dataset_root": root.as_posix(),
+               "canonical_quaternion": args.canonical_quaternion,
                "skipped_episodes": val["skipped_episodes"],
                "episodes": np.unique(val["episode_index"]).tolist(),
                "n_pairs": int(len(t)),
@@ -94,7 +105,8 @@ def main():
     else:
         for name, m in results.items():
             metrics.append_results({"run_name": f"baseline:{name}", "dataset": root.name,
-                                    "encoder": "baseline", **m})
+                                    "encoder": "baseline",
+                                    "canonical_quaternion": args.canonical_quaternion, **m})
         print(f"added {len(results)} rows to {metrics.RESULTS_CSV}")
 
 
