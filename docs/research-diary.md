@@ -247,3 +247,52 @@ Run: `star-il-simplecnn-latent512-seed0` — **now my reference baseline**.
 - [ ] **Diagnostics:** train/val overlay plot, per-dimension action error, state-only baseline.
 - [ ] **First regularisation experiment:** weight decay (AdamW), compared against the reference run with everything else unchanged.
 - [ ] **Later:** image augmentation, and residual targets for the world model (to discuss with Michael).
+
+---
+
+## 2026-10-20
+
+### Reading
+
+Today I read the paper "Generalized Recognition of Basic Surgical Actions…". It introduces **Basic Surgical Actions (BSA)** and shows that a video transformer, built on a pretrained ViT-B/16, can classify them very accurately in surgical videos.
+This is a perception task, not control, so it relates to my **encoder** rather than my actor. Two ideas for future extensions:
+
+1. break the evaluation down per action, to see which ones are hardest;
+2. try an encoder that takes several frames as input.
+
+### Diagnostics of the first STAR-IL run
+
+I added per-dimension errors (action and next state) to the metrics and re-evaluated `star-il-simplecnn-latent512-seed0` with its saved weights (no retraining).
+
+| | Position (x, y, z) | Orientation (quaternion) |
+|---|---|---|
+| Val MSE per dimension (normalised, ≈ 1 − R²) | 0.011–0.034 | 0.12–0.20 |
+| Val / train | ×27–49 | ×100–335 |
+
+1. **The model learns the tool position well, but not its orientation.**
+   The quaternion is ~90% of the val action error. Rotation error on val: median 3.6°, mean 6.6° (train: 0.87° mean).
+2. **Orientation is almost constant within an episode but varies a lot between episodes** (up to 122° from the mean orientation).
+   So there are only about 409 distinct orientations, and the model has enough capacity to partly memorise them.
+3. **The quaternion labels have an inconsistent sign.**
+   The same rotation is stored as q in some episodes and as −q in others (259 vs 150 train episodes on the two sides), and MSE treats them as different targets. So on unseen episodes the model sometimes predicts the wrong sign (4.9% of val frames) or an average of the two (|q| < 0.7, 10.5% of val frames).
+   The effect is mainly between episodes; within episodes it is rare (71 sign flips in 174k frames).
+
+Overall, three causes:
+
+- the sign inconsistency (measured: about **57%** of the val orientation MSE);
+- few distinct orientations;
+- general overfitting (position overfits too).
+
+### The fix: canonical quaternion sign
+
+I canonicalise the quaternion sign at load time (`--canonical-quaternion`, off by default). Every quaternion is flipped to the side of a reference rotation, the mean rotation of the train labels, which is saved with each run as `quat_reference.json`. The Open-H files stay unchanged.
+
+**E0** confirmed that it works: 0 sign flips and 0 opposite-sign neighbours on train and val. Every orientation is at most 123.5° (train) / 120.8° (val) from the reference, well below 180°, where the sign would become ambiguous again.
+
+Options, decision and success criteria: `docs/decisions/2026-10-20_next-direction.md`.
+
+### Next steps
+
+- [ ] **E1:** retrain with canonicalised labels, 3 seeds (running overnight), plus the old reference with seeds 1 and 2 to measure the seed-to-seed variation. Compare in degrees, not in normalised MSE.
+- [ ] **E2:** a state-only MLP (joint angles → action), to check whether the image encoder helps.
+- [ ] Then decide between regularisation (E3) and other choices (relative actions, 6D rotation).
