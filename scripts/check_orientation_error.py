@@ -108,7 +108,8 @@ def measure(model, split, stats, names, q, ref, batch_size):
     episodes = {}
     for e in np.unique(ep):
         sel = ep == e
-        episodes[int(e)] = {"group": "+" if side[sel].mean() > 0 else "-",
+        episodes[int(e)] = {"n_pairs": int(sel.sum()),   # weight for frame-level means
+                            "group": "+" if side[sel].mean() > 0 else "-",
                             "rot_err_deg": float(angle[sel].mean()),
                             "wrong_sign_pct": float(100 * wrong_sign[sel].mean()),
                             "q_pred_norm": float(norm[sel].mean())}
