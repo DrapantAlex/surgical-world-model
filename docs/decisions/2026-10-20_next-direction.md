@@ -127,6 +127,7 @@ normalised MSE). Runs with different conventions are compared on **rotation erro
 | E3 | **Weight decay (AdamW)** on top of E1, everything else unchanged | Regularisation reduces memorisation (cause 3) | lower val action loss and rotation error than E1, with a smaller train/val gap | no val improvement, or both train and val get worse |
 | E4 | `check_quaternion_sign.py` on tissue lift (both arms, action and state) | The sign issue is not specific to STAR-IL | flips / opposite-sign neighbours found | none found: canonicalisation is a no-op there |
 | E5 | (conditional on E1) 6D rotation representation | A continuous representation helps where canonicalisation is not enough | lower val rotation error than E1 | no gain: keep canonicalised quaternions |
+| E6 | **World model off**: E1 with `--w-next-state 0 --w-next-image 0`, 3 seeds | The WM auxiliary task shapes the shared encoder in a way that helps the actor | see §4.2 | see §4.2 |
 
 E2 is especially important for the thesis: if a state-only MLP matches E1, the image encoder (the final product)
 currently contributes little to the actor.
@@ -147,6 +148,31 @@ All three criteria are met: 0 flips, 0 opposite-sign neighbours, and every angle
 (180° would make the sign ambiguous again). Val's raw labels had the same inconsistency as train (38% of frames on
 the other side of the reference); the train reference fixes them without using val statistics.
 The canonical-signs val baselines (`scripts/baselines.py --canonical-quaternion`) are still to be run.
+
+### 4.2 E6 — world-model-off ablation: criteria fixed BEFORE the runs (2026-10-21)
+**Question:** does the world-model auxiliary task help the actor (the final product)?
+
+**Runs:** `star-il-simplecnn-latent512-canonq-nowm-seed{0,1,2}`, identical to E1
+(`star-il-simplecnn-latent512-canonq-seed{0,1,2}`) except `--w-next-state 0 --w-next-image 0` (commit `fdddc0a`).
+With both weights at 0 the WM heads send no gradient to the encoder: `scripts/check_wm_off_gradient.py` finds the
+gradient of the total loss identical to that of the action loss alone (max difference exactly 0 with op
+determinism). Checkpointing and early stopping still use `val_action_output_loss`, which Keras logs **unweighted**,
+so it is the same quantity in E1 and E6.
+
+**Metrics:** val rotation error mean (deg) and val position error mean (raw units), both from
+`check_orientation_error.py`. Each group is summarised by its seed mean and its **seed range** (min–max over 3 seeds).
+The **paired test** is a paired episode bootstrap (`compare_runs.py --paired E1 nowm`): seed-averaged per-episode error,
+difference E1 − nowm per val episode, frame-weighted, 95% CI. A negative difference means E1 is better.
+Median and p90 rotation, the train/val gap, and E2 (state-only) are reported but are not part of the verdict.
+
+| Verdict | Rule |
+|---|---|
+| **WM helps** | for BOTH rotation and position: E1's seed range is entirely below nowm's (no overlap) AND the paired 95% CI of E1 − nowm is entirely < 0 |
+| **No effect** | for both metrics the seed ranges overlap |
+| **WM hurts** | for rotation OR position: nowm's seed range is entirely below E1's AND the paired 95% CI is entirely > 0 |
+| **Mixed / inconclusive** | any other combination (e.g. ranges separated but CI contains 0, or one metric better and the other worse); reported as such, never as "helps" |
+
+Position is reported in raw units and as raw × 1000 ("mm, assuming metres"; the unit is still unconfirmed, §5 Q1).
 
 ---
 
