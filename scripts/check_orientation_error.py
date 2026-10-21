@@ -106,12 +106,14 @@ def measure(pred_n, split, stats, names, q, ref):
         m[f"group{g}_rot_err_deg_mean"] = float(angle[sel].mean()) if sel.any() else float("nan")
         m[f"group{g}_wrong_sign_pct"] = float(100 * wrong_sign[sel].mean()) if sel.any() else float("nan")
 
+    pos_err = np.linalg.norm(pred[:, POS] - true[:, POS], axis=1)
     episodes = {}
     for e in np.unique(ep):
         sel = ep == e
         episodes[int(e)] = {"n_pairs": int(sel.sum()),   # weight for frame-level means
                             "group": "+" if side[sel].mean() > 0 else "-",
                             "rot_err_deg": float(angle[sel].mean()),
+                            "pos_err_raw": float(pos_err[sel].mean()),   # for paired tests
                             "wrong_sign_pct": float(100 * wrong_sign[sel].mean()),
                             "q_pred_norm": float(norm[sel].mean())}
     return m, episodes
