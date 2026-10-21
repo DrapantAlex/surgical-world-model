@@ -296,3 +296,27 @@ Options, decision and success criteria: `docs/decisions/2026-10-20_next-directio
 - [ ] **E1:** retrain with canonicalised labels, 3 seeds (running overnight), plus the old reference with seeds 1 and 2 to measure the seed-to-seed variation. Compare in degrees, not in normalised MSE.
 - [ ] **E2:** a state-only MLP (joint angles → action), to check whether the image encoder helps.
 - [ ] Then decide between regularisation (E3) and other choices (relative actions, 6D rotation).
+
+---
+
+## 2026-10-21
+
+### E1: canonicalisation runs (3 seeds)
+
+I checked the canonicalisation runs (E1, 3 seeds). **Just making the quaternion sign consistent reduced the val rotation error from 6.6° to 0.92° and the position error from 5.7 to 2.9 mm.**
+
+The tissue-lift dataset doesn't have STAR-IL's sign problem, so the problem comes from STAR-IL's logging.
+I also confirmed the units: positions in metres, joint angles in radians, orientation as quaternions.
+
+### E2: state-only MLP
+
+I ran E2, a state-only MLP with no image. **It performs better than the full image model** (0.41° / 1.2 mm vs 0.92° / 2.9 mm, better on 49 of 51 val episodes).
+For an absolute pose, the target is almost forward kinematics from the joint angles, so the image isn't needed, and the CNN branch mostly memorises episodes (train/val gap ×7 vs ×2).
+
+### Next steps
+
+- [ ] **World-model-off ablation** (running, 3 seeds): does the world-model auxiliary task help the actor?
+- [ ] **Relative action chunks:** the actor predicts the next k movements relative to the current pose, so it has to use the scene. To read: ACT (Sec. IV.A, VI.A) and Open-H (GR00T-H methods).
+- [ ] **Delta state** for the world model, instead of the full next state.
+- [ ] **Regularisation**, once the architecture is fixed.
+- [ ] **Encoder comparison** and more Open-H datasets.
