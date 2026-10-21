@@ -171,3 +171,10 @@ The canonical-signs val baselines (`scripts/baselines.py --canonical-quaternion`
 8. **Origin of the sign convention:** why does the STAR-IL logging switch the sign (KUKA controller, ROS
    conversion)? Not needed for the fix, but worth one sentence in the thesis.
 9. **World model:** residual targets (Δstate, Δimage) for the copy-baseline problem — still open, to discuss with Michael.
+10. **E4 on the tissue lift state quaternions (deferred):** E4 (2026-10-21) checked only the action quaternions
+    (`--quat-start 3` and `11`, train and val): 0 flips, 0 opposite-sign neighbours, w ≥ 0 in every frame, so
+    tissue lift has a consistent sign convention. `check_quaternion_sign.py` cannot read the state
+    (`psm*_pose.orientation`) yet. Add a `--key {action,observation.state}` flag and run it **before the first
+    tissue lift training with `--canonical-quaternion`**. Also at that point: the Markley reference for PSM1
+    came out with w < 0 (eigenvector sign is arbitrary), so canonicalisation would flip *every* PSM1 label to −q.
+    That is harmless but surprising, so consider choosing the reference sign with w ≥ 0.

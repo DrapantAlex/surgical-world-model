@@ -293,7 +293,7 @@ def cached_frames(split, episodes, camera=CAMERA, size=IMG_SIZE, root=ROOT, cach
 
 # --- F: many episodes (a whole split) ---
 def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episodes=None,
-               use_cache=True, cache_dir=CACHE_DIR, quat_ref=None):
+               use_cache=True, cache_dir=CACHE_DIR, quat_ref=None, with_frames=True):
     """Load every episode of a split ("train" or "val") into flat arrays.
 
     Each frame is stored once (uint8). `pair_index` lists the positions t whose
@@ -304,9 +304,11 @@ def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episo
     `quat_ref` (D1): canonical quaternion signs; `stats` must have been computed with it.
     Full splits read their frames from the memory-mapped cache (built on first use);
     subsets decode their videos directly and never touch the cache.
+    `with_frames=False` (state-only models): tables only, "frames" is None. Episodes are
+    still filtered by video, so the pairs are exactly those of an image model.
     """
     check_split(split)
-    from_cache = use_cache and episodes is None
+    from_cache = with_frames and use_cache and episodes is None
     if episodes is None:
         episodes = get_split_episodes(split, root)
     episodes, skipped = drop_missing_videos(split, episodes, camera, root)
@@ -318,7 +320,9 @@ def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episo
     # allocate once, so all frames never exist twice in memory
     lengths = load_episode_lengths(root)
     N = sum(lengths[ep] for ep in episodes)
-    if from_cache:
+    if not with_frames:
+        frames = None
+    elif from_cache:
         frames = cached_frames(split, episodes, camera, size, root, cache_dir)
     else:
         frames = np.empty((N, size, size, 3), np.uint8)
@@ -333,7 +337,7 @@ def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episo
         ep_states, ep_actions = load_table(ep, root, quat_ref)
         T = len(ep_states)
         assert T == lengths[ep], f"episode {ep}: {T} rows vs {lengths[ep]} in episodes.jsonl"
-        if not from_cache:
+        if with_frames and not from_cache:
             ep_frames = load_frames(ep, camera=camera, size=size, root=root)
             assert len(ep_frames) == T, f"episode {ep}: {len(ep_frames)} frames vs {T} rows"
             frames[start:start + T] = ep_frames
@@ -344,7 +348,7 @@ def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episo
         start += T
 
     return {
-        "frames": frames,                 # (N, size, size, 3) uint8
+        "frames": frames,                 # (N, size, size, 3) uint8, or None (with_frames=False)
         "states": states,                 # (N, state_dim) normalised
         "actions": actions,               # (N, action_dim) normalised
         "episode_index": episode_index,   # (N,) which episode each frame is from

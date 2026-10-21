@@ -66,9 +66,10 @@ def predict_actions(model, split, batch_size):
            for inputs, _ in make_dataset(split, batch_size, shuffle=False)]
     return np.concatenate(out)
 
-def measure(model, split, stats, names, q, ref, batch_size):
+def measure(pred_n, split, stats, names, q, ref):
+    """pred_n: predicted actions (normalised) for split["pair_index"], from any model."""
     t = split["pair_index"]
-    pred_n, true_n = predict_actions(model, split, batch_size), split["actions"][t]
+    true_n = split["actions"][t]
     pred = data.unnormalise(pred_n, stats, "action").astype(np.float64)
     true = data.unnormalise(true_n, stats, "action").astype(np.float64)
     qp, qt = pred[:, q], true[:, q]
@@ -119,31 +120,28 @@ def measure(model, split, stats, names, q, ref, batch_size):
 # --------------------------------------------------------------------------
 # Section 3 - run, report, save next to the run (not in val_metrics / results.csv)
 # --------------------------------------------------------------------------
-def main():
-    args = parse_args()
-    out = OUTPUTS / args.run_name
-    cfg = json.loads((out / "config.json").read_text())
-    stats = data.load_norm_stats(out / "norm_stats.json")
+def check_run(out, cfg, stats, predict, with_frames=True, train_episodes=20,
+              val_episodes=None, quat_start=3):
+    """Measure one run on the train subset and val; save check_orientation_error.json.
+    predict(split) -> predicted normalised actions for split["pair_index"]: the only
+    model-specific part, so image and state-only models are measured by the same code."""
     root = dataset_root(cfg)
     names = data.feature_names(root)[1]
-    q = slice(args.quat_start, args.quat_start + 4)
+    q = slice(quat_start, quat_start + 4)
     ref = train_reference(root, q)
-
-    model = build_model(cfg)
-    model.load_weights(str(out / "best.weights.h5"))
 
     train_eps, _ = data.drop_missing_videos("train", data.get_split_episodes("train", root),
                                             root=root, verbose=False)
-    val_eps = None if args.val_episodes is None else data.get_split_episodes("val", root)[:args.val_episodes]
-    splits = {"train_subset": ("train", evenly_spaced(train_eps, args.train_episodes)),
+    val_eps = None if val_episodes is None else data.get_split_episodes("val", root)[:val_episodes]
+    splits = {"train_subset": ("train", evenly_spaced(train_eps, train_episodes)),
               "val": ("val", val_eps)}
 
     results, per_episode = {}, {}
     for name, (split, eps) in splits.items():
         loaded = data.load_split(split, root=root, stats=stats, episodes=eps,
-                                 quat_ref=run_quat_ref(cfg, out))   # the run's own labels
-        results[name], per_episode[name] = measure(model, loaded, stats, names, q, ref,
-                                                   cfg["batch_size"])
+                                 quat_ref=run_quat_ref(cfg, out),   # the run's own labels
+                                 with_frames=with_frames)
+        results[name], per_episode[name] = measure(predict(loaded), loaded, stats, names, q, ref)
         del loaded
 
     print(f"\nreference rotation (train mean) = {np.round(ref, 3)}\n")
@@ -155,12 +153,27 @@ def main():
         print(f"  {e:4d} {v['group']:>5s} {v['rot_err_deg']:8.1f} {v['wrong_sign_pct']:12.1f}"
               f" {v['q_pred_norm']:9.3f}")
 
-    subset = "" if args.val_episodes is None else "_val_subset"   # quick tests: own file
+    subset = "" if val_episodes is None else "_val_subset"   # quick tests: own file
     path = out / f"check_orientation_error{subset}.json"
     path.write_text(json.dumps({"reference_q": ref.tolist(), "train_subset_episodes":
                                 splits["train_subset"][1], "results": results,
                                 "per_episode": per_episode}, indent=2))
     print(f"\nsaved {path}")
+
+
+def main():
+    """Image models (scripts/train.py runs). State-only runs are checked by their own script."""
+    args = parse_args()
+    out = OUTPUTS / args.run_name
+    cfg = json.loads((out / "config.json").read_text())
+    if cfg.get("model_type") == "state_only":
+        raise SystemExit("state-only run: it is checked by scripts.train_state_only")
+    stats = data.load_norm_stats(out / "norm_stats.json")
+    model = build_model(cfg)
+    model.load_weights(str(out / "best.weights.h5"))
+    check_run(out, cfg, stats, lambda split: predict_actions(model, split, cfg["batch_size"]),
+              train_episodes=args.train_episodes, val_episodes=args.val_episodes,
+              quat_start=args.quat_start)
 
 
 if __name__ == "__main__":
