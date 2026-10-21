@@ -10,6 +10,7 @@ The test split is never loaded.
   python -m scripts.train --run-name smoke --max-episodes 2 --epochs 2 --wandb-mode offline
   python -m scripts.train --run-name smoke --eval-only
   python -m scripts.train --dataset-root data/open_h/Surgical/jhu/imerse/star_il/star_il
+  python -m scripts.train ... --w-next-state 0 --w-next-image 0   # world model off (actor only)
 """
 import argparse
 import json
@@ -30,6 +31,8 @@ from models.simple_world_model.swm import build_actor_world_model
 from models.visualization import WorldModelTimelineCallback
 
 # --- 0: fixed choices (deliberately not command-line options) ---
+# the action weight is fixed; the two world-model weights are only the DEFAULTS of
+# --w-next-state / --w-next-image (and the values of runs saved before those options)
 LOSS_WEIGHTS = {"action_output": 1.0, "next_state_output": 1.0, "next_image_output": 0.1}
 MONITOR = "val_action_output_loss"     # best checkpoint and early stopping
 WANDB_PROJECT = "surgical-world-model"
@@ -59,6 +62,10 @@ def parse_args():
     p.add_argument("--canonical-quaternion", action="store_true",
                    help="flip every quaternion label to the sign of the train mean rotation "
                         "(saved as quat_reference.json); off = the dataset's own signs")
+    p.add_argument("--w-next-state", type=float, default=LOSS_WEIGHTS["next_state_output"],
+                   help="loss weight of the next-state head (0 = no gradient from it)")
+    p.add_argument("--w-next-image", type=float, default=LOSS_WEIGHTS["next_image_output"],
+                   help="loss weight of the next-image head (0 = no gradient from it)")
     p.add_argument("--vis-every", type=int, default=5, help="timeline image every N epochs")
     p.add_argument("--wandb-mode", choices=["online", "offline", "disabled"], default="online")
     p.add_argument("--deterministic", action="store_true", help="deterministic TF ops (slower)")
@@ -69,6 +76,8 @@ def parse_args():
         p.error("--unfreeze-last-n needs --freeze-encoder")
     if args.eval_only and not args.run_name:
         p.error("--eval-only needs --run-name")
+    if args.w_next_state < 0 or args.w_next_image < 0:
+        p.error("loss weights must be >= 0")
     return args
 
 
@@ -97,6 +106,12 @@ def episodes_for(split, max_episodes, root):
     """None = the whole split (read from the frame cache); else its first N episodes."""
     return None if max_episodes is None else data.get_split_episodes(split, root)[:max_episodes]
 
+def loss_weights(cfg):
+    """Runs saved before --w-next-state / --w-next-image used the LOSS_WEIGHTS defaults."""
+    return {"action_output": LOSS_WEIGHTS["action_output"],
+            "next_state_output": cfg.get("w_next_state", LOSS_WEIGHTS["next_state_output"]),
+            "next_image_output": cfg.get("w_next_image", LOSS_WEIGHTS["next_image_output"])}
+
 def build_model(cfg):
     state_dim, action_dim = data.feature_dims(dataset_root(cfg))
     model = build_actor_world_model(state_dim, action_dim,
@@ -107,7 +122,7 @@ def build_model(cfg):
                   loss={"action_output": keras.losses.Huber(),
                         "next_state_output": "mse",
                         "next_image_output": "mse"},
-                  loss_weights=LOSS_WEIGHTS)
+                  loss_weights=loss_weights(cfg))
     return model
 
 def evaluate(model, val, stats, batch_size, root):
@@ -233,7 +248,7 @@ def train(args):
     cfg["run_name"] = run_name
     model = build_model(cfg)
     cfg.update(
-        freeze=freeze_label(cfg), monitor=MONITOR, loss_weights=LOSS_WEIGHTS,
+        freeze=freeze_label(cfg), monitor=MONITOR, loss_weights=loss_weights(cfg),
         params_total=int(model.count_params()),
         params_trainable=int(sum(np.prod(w.shape) for w in model.trainable_weights)),
         n_train_pairs=int(len(train_split["pair_index"])), n_val_pairs=int(len(val["pair_index"])),
@@ -287,7 +302,9 @@ def train(args):
                                 "encoder": args.encoder,
                                 "canonical_quaternion": args.canonical_quaternion,
                                 "freeze": cfg["freeze"], "seed": args.seed,
-                                "latent_dim": args.latent_dim, "epochs": cfg["epochs_run"],
+                                "latent_dim": args.latent_dim,
+                                "w_next_state": args.w_next_state,
+                                "w_next_image": args.w_next_image, "epochs": cfg["epochs_run"],
                                 "best_epoch": cfg["best_epoch"],
                                 "train_time_min": cfg["train_time_min"], **val_metrics})
         print(f"\nadded a row to {metrics.RESULTS_CSV}")
