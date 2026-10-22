@@ -320,3 +320,45 @@ For an absolute pose, the target is almost forward kinematics from the joint ang
 - [ ] **Delta state** for the world model, instead of the full next state.
 - [ ] **Regularisation**, once the architecture is fixed.
 - [ ] **Encoder comparison** and more Open-H datasets.
+
+---
+
+## 2026-10-22
+
+### E6: world model off
+
+E1 (WM on) vs E6 (WM loss weights = 0), 3 seeds, 51 val episodes:
+
+| | WM on | WM off |
+|---|---|---|
+| Rotation | 0.92° | 0.89° |
+| Position | 2.90 mm | 2.92 mm |
+
+**Verdict: no detectable effect** (seed ranges overlap; E1 better on 26/51 episodes).
+This was expected: the image isn't needed for this task (E2), so a loss that shapes the image encoder can't help.
+To check: the nowm runs were trained from uncommitted code; some runs hit the 100-epoch limit.
+
+### The shortcut
+
+At 30 Hz the tool moves ~0.1 mm per frame, so action_t ≈ state_t+1 ≈ state_t.
+
+- **Actor:** in STAR-IL the state is 8 joint angles, and the next pose ≈ forward kinematics(angles). The network learns this formula and ignores the image.
+- **World model:** it gets action_t and predicts state_t+1 ≈ action_t, so it can copy.
+
+### Papers
+
+- **ACT:** predict a chunk of k actions from one observation, which reduces compounding errors (success 1% at k = 1 → 44% at k = 100). Temporal ensembling adds only ~3%. A plain CNN + MLP also benefits from chunking.
+- **GR00T-H:** GR00T-N1.6 post-trained on 601 h of surgical data. Chunks of 50, relative EEF + 6D rotation, normalisation per chunk step. It beats ACT, especially in unseen scenes (54% vs 5%), so small models generalise poorly.
+- **Related work:** Surgical WAM, FLARE, Cosmos-H-Surgical. None tests a WM auxiliary loss on/off in a small model on real data.
+
+### Proposed changes (asked Davide and Michael)
+
+- **Actor:** predict k relative actions (anchor a_t−1) → the target becomes the movement, which needs the image.
+- **WM:** predict the change of state (open issue: Δstate ≈ Δaction).
+- **Baselines:** stand still, state-only; error per chunk step; repeat E6.
+- Chunks first, then the encoder comparison.
+
+### Next steps
+
+- [ ] Relative-action statistics and stand-still error per horizon (no training).
+- [ ] Update the decision record; add Surgical WAM and FLARE to the Library.
