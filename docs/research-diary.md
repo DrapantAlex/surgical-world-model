@@ -362,3 +362,48 @@ At 30 Hz the tool moves ~0.1 mm per frame, so action_t ≈ state_t+1 ≈ state_t
 
 - [ ] Relative-action statistics and stand-still error per horizon (no training).
 - [ ] Update the decision record; add Surgical WAM and FLARE to the Library.
+
+---
+
+## 2026-10-23
+
+### Stand-still baseline per horizon
+
+How wrong is the commanded pose a(t) as a prediction of a(t+h), for h = 1..60 frames? No training, labels only, loaded like train.py (canonical quaternions). Time = frame_index / 30, because STAR-IL timestamps are constant within an episode. Script: `scripts/look_standstill_baseline.py`.
+
+Val split (51 episodes, mean / median):
+
+| h | time | Position | Rotation |
+|---|---|---|---|
+| 1 | 0.03 s | 0.42 / 0.29 mm | 0.09 / 0.03° |
+| 5 | 0.17 s | 1.92 / 1.35 mm | 0.36 / 0.12° |
+| 10 | 0.33 s | 3.53 / 2.42 mm | 0.67 / 0.22° |
+| 30 | 1.0 s | 8.78 / 5.88 mm | 1.69 / 0.56° |
+| 60 | 2.0 s | 15.71 / 10.75 mm | 2.80 / 1.18° |
+
+Train gives almost the same curve. Correction to yesterday: the tool moves ~0.3 mm per frame (median), not ~0.1 mm.
+
+**Static frames** (a(t) → a(t+1) below 0.1 mm and 0.1°): 25% on val, 24% on train. Per episode from 5% to 54%.
+
+### E1 and E2 in "frames of delay"
+
+At h = 1 the stand-still baseline uses the same 20,111 val pairs as E1 and E2, so the errors can be compared directly:
+
+| | Error (mean) | ≈ stand still for |
+|---|---|---|
+| E1 image model | 2.90 mm, 0.92° | 8 frames (pos), 14 frames (rot) |
+| E2 state-only | 1.24 mm, 0.41° | 3 frames (pos), 6 frames (rot) |
+
+**No model beats standing still for one frame** (0.42 mm, 0.09°). This is not a fair contest, because the actor never sees a(t). But it gives a physical scale: E2 is as wrong as a command 0.1–0.2 s old, E1 as one 0.3–0.5 s old.
+
+### What this means for relative action chunks
+
+- A quarter of the targets would be ≈ 0, so a model that always predicts "no motion" already scores well. Report chunk errors next to the stand-still curve, and separately for static and moving frames.
+- The error keeps growing with h (~0.35 mm per frame up to h = 10, ~0.23 mm per frame from h = 30 to 60), so later chunk steps will dominate an unweighted loss. Normalisation per chunk step (as in GR00T-H) handles this.
+- Rotation: mean ≈ 2.4–3.6× median, so most rotation change happens in a few large reorientations.
+
+### Next steps
+
+- [x] Stand-still error per horizon.
+- [ ] Relative-action statistics (distribution of Δa per chunk step).
+- [ ] Add Surgical WAM and FLARE to the Library.
