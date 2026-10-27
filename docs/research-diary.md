@@ -407,3 +407,53 @@ At h = 1 the stand-still baseline uses the same 20,111 val pairs as E1 and E2, s
 - [x] Stand-still error per horizon.
 - [ ] Relative-action statistics (distribution of Δa per chunk step).
 - [ ] Add Surgical WAM and FLARE to the Library.
+
+---
+
+## 2026-10-27 (World Model Day)
+
+### Roadmap step 0: errors by phase and speed (no retraining)
+
+Val errors of E1 (image + WM), E6 (image, WM off) and E2 (state-only), split by phase and speed, 3 seeds each. Script: `scripts/look_static_vs_moving.py`.
+
+- **Static vs moving** (25% static frames, same threshold as the stand-still script): no model does better on static frames.
+- **Speed bins** (moving frames only, 3 equal groups by Δpos per frame: slow 0.03–0.29, medium 0.29–0.61, fast 0.61–5.89 mm/frame): the error is flat across speed. A second speed measure (max-rank of position/rotation change) gives the same result.
+- **State-only wins in every group**: ~1.2 mm / 0.4° vs ~2.9 mm / 0.9° (2.3–2.7× better on mean, median and p90). E1 ≈ E6 in every group.
+
+**Interpretation:** the current actors predict where the tool should be now, which is almost where it already is (action ≈ FK(state)). They read the pose and don't predict motion. This is the "before" picture for the chunked actor, whose error should grow with speed.
+
+### Davide (reply to my roadmap)
+
+- Roadmap approved.
+- WM targets from a frozen encoder: "ALPS e DINO fanno meglio di JEPA".
+- Suggested Long-WAM (step-by-step with teacher forcing). My plan: start with parallel jumps (t+4, t+8, t+12, t+16), and use Long-WAM only if the WM doesn't help. Still to confirm with him.
+
+### Meeting with Michael
+
+- Distribution analysis of actions and states in Open-H.
+- Penalise orientation errors more (exact meaning to clarify).
+- Check the normalisation. Checked in the code: per-dimension z-score with train-split mean/std (`compute_norm_stats` / `normalise` in `models/data.py`, std floored at 1e-6, quaternions canonicalised before the stats).
+- WM with two targets: Δstate (actions given as input) + future-image features from a frozen encoder.
+- Action chunking. The action should be a "velocity".
+
+### Open questions for Michael
+
+- "Velocity": the change from the previous step, or offsets from the current pose? (Per-step changes pile up errors; ACMT found chained deltas worse.)
+- Orientation penalty: a bigger loss weight, or an angle-based loss? Still needed with 6D?
+- Δstate horizon (one frame or the whole chunk) and units (joint angles or tool pose).
+
+### Planned WM ablation
+
+All with the same chunked actor and 3 seeds:
+
+| | WM |
+|---|---|
+| A | off |
+| B | full (Δstate + image features) |
+| C (optional) | image features only |
+
+### Next steps
+
+- [ ] Distribution analysis of actions and states (train vs val, absolute values and changes over 1 and 16 frames).
+- [ ] Send the open questions to Michael.
+- [ ] Chunked actor (k = 16) + 6D, with stand-still, constant-velocity and state-only baselines. Rerun the phase/speed table on it.
