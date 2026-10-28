@@ -457,3 +457,72 @@ All with the same chunked actor and 3 seeds:
 - [ ] Distribution analysis of actions and states (train vs val, absolute values and changes over 1 and 16 frames).
 - [ ] Send the open questions to Michael.
 - [ ] Chunked actor (k = 16) + 6D, with stand-still, constant-velocity and state-only baselines. Rerun the phase/speed table on it.
+
+---
+
+## 2026-10-28
+
+### Today in five lines
+
+- I studied the STAR-IL distributions to choose the normalisation from data (Michael said normalisation is the main problem).
+- Positions are well-behaved, but changes (one frame or 16 frames) are tiny, smooth, heavy-tailed and often exactly zero.
+- From this I chose: keep the z-score for positions; use a median-based scale + Huber for change targets; use option C for action chunks later.
+- I prepared E7: the world model now predicts the change of the joints instead of the absolute next state.
+- E7 is coded (one line written by me), the smoke test passed, and the 3 training runs are running.
+
+### What the data showed → what I chose
+
+| # | The data shows | So I chose |
+|---|---|---|
+| 1 | Positions look like a bell curve (kurtosis −1.3 to 1.4, max \|z\| 4.5), but scales differ ~40× (tool position std 0.025, joint 6 std 0.95); train and val means differ ≤ 0.25 std | train-only z-score for the state input; val is a fair test set |
+| 2 | One frame moves ~1% of the pose spread (0.3 mm vs 24 mm); "copy the last action" already gets 0.42 mm / 0.09° on val | report every result next to the stand-still baseline; move to targets that are the motion itself |
+| 3 | The 16-step change is ~13× the 1-step change (0.31 → 3.96 mm), close to 16 (steady motion), far from 4 (random noise) | 16-step action chunks + a constant-velocity baseline |
+| 4 | Changes have heavy tails (kurtosis up to 339) and many exact zeros (endoscope still 84% of frames); joint 6 IQR/std ≈ 0.002 | scale changes by the median, with a floor, and train with Huber |
+| 5 | Chunk offsets grow ~13× from step 1 to 16, while the ratio stays ~11.8 mm per degree at every step | option C: one median scale per group (position, rotation) per step, rotation as one angle (6D), Huber; fallback = option A (GR00T-H, Open-H Table S2 p. 52) |
+
+**Key ideas to remember:**
+
+- **Position vs change:** the z-score is good for positions, bad for changes (the std of changes is set by rare jumps).
+- **Normalisation = hidden loss weights.** Per-step scaling makes step 1 and step 16 count equally (with one ruler and MSE, step 16 would count ~170× more).
+- **Huber** stops rare jumps from dominating; it does not fix the step imbalance (that is the per-step scale's job).
+
+### E7: what it is
+
+E7 = E1 + one design change: the WM state branch predicts the change f (Δstate), not the absolute next state.
+
+**Why:** with the absolute next state, "copy the current state" is almost perfect, so the WM had nothing to learn. This is a likely reason why E6 (WM off) = E1 (WM on).
+
+### E7: what was implemented (by Claude Code, except one line)
+
+| File | Change in plain words |
+|---|---|
+| `swm.py` | The state branch outputs f (the change). A fixed skip connection adds it back: next state = s(t) + k × f, with k = scale / std (normalised units). No new trainable weights. |
+| `data.py` | `compute_delta_scale`: from raw train states, Δ = s(t+1) − s(t); one scale per joint, saved in `norm_stats.json` (`state_delta`). The WM target = Δ / scale. The scale line is mine. |
+| `train.py` | New flag `--state-delta`; `DELTA_FLOOR_C = 0.25`; WM state loss = Huber on the scaled change; logs the "predict f = 0" baseline (`val_next_state_output_loss_zero`). Old runs still load. |
+| `metrics.py` | `state_delta_metrics`: model's Huber on f vs Huber of f = 0. |
+
+**How the loss is applied:** it sits on `next_state_output` with the usual s(t+1) target, but both are divided by k first. Since ŝ(t+1) − s(t+1) = k · (f − Δ/scale), this is exactly Huber(f, Δ/scale). So there are still 3 outputs and `get_pairs`, the pipeline and the plots stay unchanged.
+
+**The scale rule** (8 numbers, one per joint): scale = max(median |Δ|, 0.25 × mean |Δ|), raising an error if a joint never moves.
+
+- Median = typical movement, when the joint usually moves (e.g. kuka 1: 1.5e-4 rad).
+- 0.25 × mean = safety floor for "lazy" joints whose median ≈ 0 (kuka 6 → 2.5e-5, endoscope → 2.5e-4).
+- Why scale at all: raw changes (~0.00005 rad) are too small for the loss to notice, and joints differ ~25×.
+- Why 0.25: it caps every joint's average target at 4; it is a judgement call (0.5 would also work).
+
+Script for the per-joint numbers: `scripts/look_state_delta.py`.
+
+### E7: status
+
+- Smoke test `smoke-e7-delta` passed: `state_delta` in `norm_stats.json`, the f = 0 column in `history.csv`, both Huber values in the final table.
+- Code committed as `6dd76b3`; 3 seeds launched in parallel (tmux `e7`, GPUs 2–4), same settings as E1 (state weight 1.0, image weight 0.1, Adam 3e-4, batch 32, patience 10).
+- Off arm = the 3 existing E6 runs (older commit, same actor). If on vs off differ, rerun "off" on the same commit.
+- **Compare the WM with the exact numbers in `val_metrics.json`** (`next_state_delta_huber` vs `next_state_delta_huber_zero`). The Keras val loss averages batch means equally, so the last, smaller batch is over-weighted: 3.912 vs 3.954 in the smoke run (25 batches), negligible on the full val split (629 batches).
+- The val frame cache was rebuilt at launch: same 51 episodes, 20,111 pairs as E1/E6.
+
+### Next steps
+
+- [x] Distribution analysis of actions and states.
+- [ ] E7 results: action error vs E6, and WM Huber vs f = 0.
+- [ ] Send the open questions to Michael.
+- [ ] Chunked actor (k = 16) + 6D, option C normalisation.
