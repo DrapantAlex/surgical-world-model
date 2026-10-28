@@ -11,6 +11,7 @@ The test split is never loaded.
   python -m scripts.train --run-name smoke --eval-only
   python -m scripts.train --dataset-root data/open_h/Surgical/jhu/imerse/star_il/star_il
   python -m scripts.train ... --w-next-state 0 --w-next-image 0   # world model off (actor only)
+  python -m scripts.train ... --state-delta   # E7: WM state head predicts the change (skip)
 """
 import argparse
 import json
@@ -36,6 +37,7 @@ from models.visualization import WorldModelTimelineCallback
 LOSS_WEIGHTS = {"action_output": 1.0, "next_state_output": 1.0, "next_image_output": 0.1}
 MONITOR = "val_action_output_loss"     # best checkpoint and early stopping
 WANDB_PROJECT = "surgical-world-model"
+DELTA_FLOOR_C = 0.25   # --state-delta: scale = max(median|Δ|, DELTA_FLOOR_C * mean|Δ|) per dim
 OUTPUTS, LOGS = Path("outputs"), Path("logs")
 
 
@@ -66,6 +68,9 @@ def parse_args():
                    help="loss weight of the next-state head (0 = no gradient from it)")
     p.add_argument("--w-next-image", type=float, default=LOSS_WEIGHTS["next_image_output"],
                    help="loss weight of the next-image head (0 = no gradient from it)")
+    p.add_argument("--state-delta", action="store_true",
+                   help="E7: state head predicts the change f, next_state = state + f (skip); "
+                        "loss = Huber on Δ / scale (scale saved in norm_stats.json)")
     p.add_argument("--vis-every", type=int, default=5, help="timeline image every N epochs")
     p.add_argument("--wandb-mode", choices=["online", "offline", "disabled"], default="online")
     p.add_argument("--deterministic", action="store_true", help="deterministic TF ops (slower)")
@@ -112,20 +117,35 @@ def loss_weights(cfg):
             "next_state_output": cfg.get("w_next_state", LOSS_WEIGHTS["next_state_output"]),
             "next_image_output": cfg.get("w_next_image", LOSS_WEIGHTS["next_image_output"])}
 
-def build_model(cfg):
+def delta_factor(cfg, stats):
+    """E7 runs: k = scale / std (see data.state_delta_factor); None for runs without
+    --state-delta (and runs saved before the option)."""
+    return data.state_delta_factor(stats) if cfg.get("state_delta", False) else None
+
+def scaled_huber(factor):
+    """Huber(next_state / k) = Huber(f, Δ / scale): next_state = state + k * f, so
+    (pred - true) / k = f - Δ / scale. The loss on the change, with the s(t+1) target."""
+    k = tf.constant(factor, tf.float32)
+    def loss(y_true, y_pred):
+        return keras.losses.huber(y_true / k, y_pred / k)
+    return loss
+
+def build_model(cfg, stats):
     state_dim, action_dim = data.feature_dims(dataset_root(cfg))
+    factor = delta_factor(cfg, stats)
     model = build_actor_world_model(state_dim, action_dim,
                                     latent_dim=cfg["latent_dim"], encoder=cfg["encoder"],
                                     freeze_encoder=cfg["freeze_encoder"],
-                                    unfreeze_last_n=cfg["unfreeze_last_n"])
+                                    unfreeze_last_n=cfg["unfreeze_last_n"],
+                                    delta_factor=factor)
     model.compile(optimizer=keras.optimizers.Adam(learning_rate=cfg["lr"]),
                   loss={"action_output": keras.losses.Huber(),
-                        "next_state_output": "mse",
+                        "next_state_output": "mse" if factor is None else scaled_huber(factor),
                         "next_image_output": "mse"},
                   loss_weights=loss_weights(cfg))
     return model
 
-def evaluate(model, val, stats, batch_size, root):
+def evaluate(model, val, stats, batch_size, root, factor=None):
     """Predict every val pair (fixed order) and measure it with models/metrics.py."""
     pred_action, pred_state, image = [], [], metrics.ImageMSE()
     for inputs, targets in make_dataset(val, batch_size, shuffle=False):
@@ -140,6 +160,9 @@ def evaluate(model, val, stats, batch_size, root):
                                action_names)
     m.update(metrics.next_state_metrics(np.concatenate(pred_state), val["states"][t + 1], stats,
                                         physical, state_names))
+    if factor is not None:   # E7: the loss on the change, model vs f = 0
+        m.update(metrics.state_delta_metrics(np.concatenate(pred_state), val["states"][t],
+                                             val["states"][t + 1], factor))
     m.update(metrics.next_image_metrics(image))
     return m
 
@@ -191,6 +214,17 @@ class CheckMonitor(keras.callbacks.Callback):
         if epoch == 0 and MONITOR not in (logs or {}):
             raise KeyError(f"{MONITOR!r} is not in the Keras logs: {sorted(logs or {})}")
 
+class ConstantLogs(keras.callbacks.Callback):
+    """Adds fixed reference values (e.g. the f = 0 val loss) to every epoch's logs,
+    so they appear as flat lines next to the real curves (CSV, TensorBoard, W&B)."""
+    def __init__(self, values):
+        super().__init__()
+        self.values = values
+
+    def on_epoch_end(self, epoch, logs=None):
+        if logs is not None:
+            logs.update(self.values)
+
 class WandbLogger(keras.callbacks.Callback):
     def __init__(self, run):
         super().__init__()
@@ -235,6 +269,8 @@ def train(args):
         quat_ref = data.compute_quat_reference(train_eps, root)
         data.save_quat_reference(quat_ref, out / "quat_reference.json")
     stats = data.compute_norm_stats(train_eps, root, quat_ref)
+    if args.state_delta:   # E7: Δ scale from the full train split, like the norm stats
+        stats["state_delta"] = data.compute_delta_scale(train_eps, root, quat_ref, DELTA_FLOOR_C)
     data.save_norm_stats(stats, out / "norm_stats.json")
     train_split = data.load_split("train", root=root, stats=stats, quat_ref=quat_ref,
                                   episodes=episodes_for("train", args.max_episodes, root))
@@ -246,7 +282,14 @@ def train(args):
     # model + full configuration, saved before training starts
     cfg = {k: v for k, v in vars(args).items() if k != "eval_only"}
     cfg["run_name"] = run_name
-    model = build_model(cfg)
+    model = build_model(cfg, stats)
+    factor = delta_factor(cfg, stats)
+    # E7: val loss of predicting f = 0 (the "no change" reference for the state branch)
+    zero_logs = {} if factor is None else {
+        "val_next_state_output_loss_zero": metrics.state_delta_metrics(
+            val["states"][val["pair_index"]], val["states"][val["pair_index"]],
+            val["states"][val["pair_index"] + 1], factor)["next_state_delta_huber_zero"]}
+    cfg.update(**zero_logs)
     cfg.update(
         freeze=freeze_label(cfg), monitor=MONITOR, loss_weights=loss_weights(cfg),
         params_total=int(model.count_params()),
@@ -268,6 +311,7 @@ def train(args):
     callbacks = [
         EpochTimer(),
         CheckMonitor(),
+        ConstantLogs(zero_logs),
         keras.callbacks.ModelCheckpoint(str(out / "best.weights.h5"), monitor=MONITOR, mode="min",
                                         save_best_only=True, save_weights_only=True, verbose=1),
         keras.callbacks.EarlyStopping(monitor=MONITOR, mode="min", patience=args.patience,
@@ -284,7 +328,7 @@ def train(args):
 
     # --- E: evaluate the BEST weights with the same metrics as the baselines ---
     model.load_weights(str(out / "best.weights.h5"))
-    val_metrics = evaluate(model, val, stats, args.batch_size, root)
+    val_metrics = evaluate(model, val, stats, args.batch_size, root, factor)
     monitored = history.history[MONITOR]
     cfg.update(epochs_run=len(monitored), best_epoch=int(np.argmin(monitored)) + 1,
                train_time_min=round(train_time_min, 2))
@@ -304,7 +348,8 @@ def train(args):
                                 "freeze": cfg["freeze"], "seed": args.seed,
                                 "latent_dim": args.latent_dim,
                                 "w_next_state": args.w_next_state,
-                                "w_next_image": args.w_next_image, "epochs": cfg["epochs_run"],
+                                "w_next_image": args.w_next_image,
+                                "state_delta": args.state_delta, "epochs": cfg["epochs_run"],
                                 "best_epoch": cfg["best_epoch"],
                                 "train_time_min": cfg["train_time_min"], **val_metrics})
         print(f"\nadded a row to {metrics.RESULTS_CSV}")
@@ -322,9 +367,9 @@ def eval_only(args):
     quat_ref = run_quat_ref(cfg, out)
     val = data.load_split("val", root=root, stats=stats, quat_ref=quat_ref,
                           episodes=episodes_for("val", cfg["max_episodes"], root))
-    model = build_model(cfg)
+    model = build_model(cfg, stats)
     model.load_weights(str(out / "best.weights.h5"))
-    val_metrics = evaluate(model, val, stats, cfg["batch_size"], root)
+    val_metrics = evaluate(model, val, stats, cfg["batch_size"], root, delta_factor(cfg, stats))
     save_json(val_metrics, out / "val_metrics_reeval.json")
     print(comparison_table(f"{args.run_name} (re-eval)", val_metrics, root, quat_ref is not None))
 

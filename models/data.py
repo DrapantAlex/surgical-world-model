@@ -128,6 +128,27 @@ def compute_norm_stats(episodes, root=ROOT, quat_ref=None):
         stats[key] = {"mean": mean.tolist(), "std": std.tolist()}
     return stats
 
+def compute_delta_scale(episodes, root=ROOT, quat_ref=None, floor_c=0.25):
+    """E7: per-dimension scale of the one-frame state change Δ = s(t+1) - s(t), from the
+    given (training) episodes, raw units, pairs within an episode only.
+    The world-model state target is Δ / scale. Saved in norm_stats.json as "state_delta"."""
+    deltas = [np.diff(load_table(ep, root, quat_ref)[0].astype(np.float64), axis=0)
+              for ep in episodes]
+    abs_delta = np.abs(np.concatenate(deltas))   # (P, state_dim)
+    median = np.median(abs_delta, axis=0)        # typical change per joint, shape (8,)
+    floor = floor_c * abs_delta.mean(axis=0)     # 0.25 x mean change per joint
+    scale = np.maximum(median, floor)            # the larger of the two, joint by joint
+    if (scale <= 0).any():                       # a joint that never moves: k = 0 later
+        raise ValueError(f"state dims that never move in the train split: {np.flatnonzero(scale <= 0)}")
+    return {"scale": scale.tolist(), "floor_c": floor_c}
+
+def state_delta_factor(stats):
+    """k = scale / std: one unit of f (Δ / scale) in normalised-state units,
+    so next_state = state + k * f (the same 1e-8 as normalise())."""
+    scale = np.asarray(stats["state_delta"]["scale"], dtype=np.float32)
+    std = np.asarray(stats["observation.state"]["std"], dtype=np.float32)
+    return scale / (std + 1e-8)
+
 def save_norm_stats(stats, path):
     Path(path).write_text(json.dumps(stats, indent=2))
 

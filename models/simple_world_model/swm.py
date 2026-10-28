@@ -1,4 +1,5 @@
 """Actor-world model adapted from Open-X to Open-H."""
+import numpy as np
 from tensorflow import keras
 from tensorflow.keras import layers
 
@@ -11,7 +12,9 @@ LATENT_DIM = 512   # NEW: size of the bottleneck
 # CHANGED: state_dim / action_dim have no default; pass data.feature_dims(root)
 def build_actor_world_model(state_dim, action_dim, img_h=IMG_H, img_w=IMG_W, lang_dim=LANG_DIM,
                             latent_dim=LATENT_DIM, encoder="simple_cnn",
-                            freeze_encoder=False, unfreeze_last_n=0):
+                            freeze_encoder=False, unfreeze_last_n=0, delta_factor=None):
+    # NEW (E7): delta_factor = data.state_delta_factor(stats) -> the state head predicts the
+    #   change f (in Δ/scale units) and next_state = state + delta_factor * f; None = original
     # --- A: inputs ---
     image_input = keras.Input(shape=(img_h, img_w, 3), name="image_input")
     state_input = keras.Input(shape=(state_dim,), name="state_input")
@@ -33,7 +36,14 @@ def build_actor_world_model(state_dim, action_dim, img_h=IMG_H, img_w=IMG_W, lan
         [encoded_img, state_input, language_input, action_input])
 
     s_x = layers.Dense(128, activation="relu")(wm_features)
-    next_state_output = layers.Dense(state_dim, name="next_state_output")(s_x)
+    if delta_factor is None:
+        next_state_output = layers.Dense(state_dim, name="next_state_output")(s_x)
+    else:
+        # NEW (E7): skip connection; delta_factor is a fixed constant, not trained
+        f = layers.Dense(state_dim, name="state_delta")(s_x)
+        k = np.asarray(delta_factor, dtype="float32")
+        next_state_output = layers.Add(name="next_state_output")(
+            [state_input, layers.Lambda(lambda x: x * k, name="delta_to_state")(f)])
 
     # latent_dim=None -> original decoder: the big Dense reads wm_features directly
     #   (~2.5 billion weights, ~40 GB GPU memory to train).

@@ -112,6 +112,14 @@ def next_state_metrics(pred, true, stats, physical, names):
                                  unnormalise(true, stats, key), "next_state"))
     return m
 
+def state_delta_metrics(pred, state, true, factor):
+    """E7: Huber on the change f = (next state - state) / factor, i.e. Δ / scale (the training
+    loss), for the model and for f = 0 ("no change" = copy the state). All in normalised units."""
+    true_f = (np.asarray(true, np.float64) - state) / factor
+    pred_f = (np.asarray(pred, np.float64) - state) / factor
+    return {"next_state_delta_huber": huber(pred_f, true_f),
+            "next_state_delta_huber_zero": huber(np.zeros_like(true_f), true_f)}
+
 def next_image_metrics(image_mse):
     """image_mse: a finished ImageMSE accumulator."""
     return {"next_image_mse": image_mse.result()}
