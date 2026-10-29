@@ -12,9 +12,11 @@ LATENT_DIM = 512   # NEW: size of the bottleneck
 # CHANGED: state_dim / action_dim have no default; pass data.feature_dims(root)
 def build_actor_world_model(state_dim, action_dim, img_h=IMG_H, img_w=IMG_W, lang_dim=LANG_DIM,
                             latent_dim=LATENT_DIM, encoder="simple_cnn",
-                            freeze_encoder=False, unfreeze_last_n=0, delta_factor=None):
+                            freeze_encoder=False, unfreeze_last_n=0, delta_factor=None,
+                            action_chunk=None):
     # NEW (E7): delta_factor = data.state_delta_factor(stats) -> the state head predicts the
     #   change f (in Δ/scale units) and next_state = state + delta_factor * f; None = original
+    # NEW (E8): action_chunk = k -> the actor predicts k offsets from a(t-1), shape (k, action_dim)
     # --- A: inputs ---
     image_input = keras.Input(shape=(img_h, img_w, 3), name="image_input")
     state_input = keras.Input(shape=(state_dim,), name="state_input")
@@ -29,7 +31,12 @@ def build_actor_world_model(state_dim, action_dim, img_h=IMG_H, img_w=IMG_W, lan
     # --- C: actor branch (sizes only) ---
     actor_features = layers.Concatenate()([encoded_img, state_input, language_input])
     a_x = layers.Dense(256, activation="relu")(actor_features)
-    action_output = layers.Dense(action_dim, name="action_output")(a_x)
+    if action_chunk is None:
+        action_output = layers.Dense(action_dim, name="action_output")(a_x)
+    else:
+        # NEW (E8): one Dense for the whole chunk, then (k, action_dim); same name for the loss
+        a_x = layers.Dense(action_chunk * action_dim, name="action_chunk")(a_x)
+        action_output = layers.Reshape((action_chunk, action_dim), name="action_output")(a_x)
 
     # --- D: world-model branch ---
     wm_features = layers.Concatenate()(

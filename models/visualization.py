@@ -31,6 +31,8 @@ class WorldModelTimelineCallback(keras.callbacks.Callback):
     def create_timeline_image(self, pred_next, pred_actions):
         to_u8 = lambda a: np.ascontiguousarray((np.clip(a, 0, 1) * 255).astype(np.uint8))
         true_actions = self.ref_targets["action_output"]
+        if true_actions.ndim == 3:   # NEW (E8): action chunks (k, D) -> label with step 1
+            true_actions, pred_actions = true_actions[:, 0], pred_actions[:, 0]
 
         # first column: the starting frame, and an empty slot in the PRED row
         img_t0 = to_u8(self.ref_inputs["image_input"][0])

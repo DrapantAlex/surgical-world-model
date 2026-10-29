@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from models.data import unnormalise
+from models.data import chunk_scale_per_dim, quaternion_starts, unnormalise
 
 # --- A: units and layout of the 16-D state / action vectors (tissue lift ONLY) ---
 POSITION_TO_MM = 1000.0          # ASSUMPTION: positions in the dataset are in metres
@@ -37,11 +37,14 @@ def has_tissue_lift_layout(root):
 
 
 # --- B: errors in normalised units (the same formulas as the training losses) ---
-def huber(pred, true, delta=HUBER_DELTA):
-    """keras.losses.Huber: 0.5*e^2 for |e| <= delta, delta*(|e| - delta/2) above."""
+def huber_per_element(pred, true, delta=HUBER_DELTA):
+    """keras.losses.Huber per element: 0.5*e^2 for |e| <= delta, delta*(|e| - delta/2) above."""
     err = np.abs(np.asarray(pred, np.float64) - true)
     small = np.minimum(err, delta)
-    return float(np.mean(0.5 * small ** 2 + delta * (err - small)))
+    return 0.5 * small ** 2 + delta * (err - small)
+
+def huber(pred, true, delta=HUBER_DELTA):
+    return float(np.mean(huber_per_element(pred, true, delta)))
 
 def mse(pred, true):
     return float(np.mean((np.asarray(pred, np.float64) - true) ** 2))
@@ -123,6 +126,54 @@ def state_delta_metrics(pred, state, true, factor):
 def next_image_metrics(image_mse):
     """image_mse: a finished ImageMSE accumulator."""
     return {"next_image_mse": image_mse.result()}
+
+
+# --- D2: action chunks (E8): offsets from a(t-1), option-C units ---
+CHUNK_STEPS = (1, 2, 4, 8, 12, 16)   # steps reported one by one (1 = a(t)); "mean" = all k
+
+def chunk_baselines(anchor_n, prev_n, stats):
+    """No-learning predictions in target units, shape (N, k, D):
+    stand-still (offset 0: a(t+i) = a(t-1)) and constant velocity
+    (offset_i = (i+1) * (a(t-1) - a(t-2)))."""
+    scale = chunk_scale_per_dim(stats)
+    velocity = (unnormalise(anchor_n, stats, "action").astype(np.float64)
+                - unnormalise(prev_n, stats, "action"))
+    steps = np.arange(1, len(scale) + 1)[None, :, None]
+    return {"standstill": np.zeros((len(anchor_n),) + scale.shape),
+            "constvel": steps * velocity[:, None, :] / scale}
+
+def group_name(names, dims):
+    """Shared prefix of a group ("kuka_pose", "kuka_pose.ori"), or the single dim's name."""
+    return names[dims[0]].rsplit(".", 1)[0] if len(dims) > 1 else names[dims[0]]
+
+def chunk_metrics(pred, true, anchor_n, stats, names, steps=CHUNK_STEPS):
+    """One predictor, (N, k, D) in target units. Huber/MSE in target units (the training
+    loss) and per-group errors after reconstruction: offsets x scale + a(t-1), raw units.
+    Quaternion groups -> degrees (renormalised by quaternion_angle_deg), other 3-D groups
+    -> mm (POSITION_TO_MM assumption), anything else -> mean |error| in raw units."""
+    pred, true = np.asarray(pred, np.float64), np.asarray(true, np.float64)
+    m = {"action_mse": mse(pred, true), "action_huber": huber(pred, true)}
+    errors = {"huber": huber_per_element(pred, true).mean(axis=-1)}   # (N, k)
+    scale = chunk_scale_per_dim(stats)
+    off_pred, off_true = pred * scale, true * scale
+    anchor = unnormalise(anchor_n, stats, "action").astype(np.float64)[:, None, :]
+    quats = quaternion_starts(names)
+    for dims in stats["action_chunk"]["groups"]:
+        name = group_name(names, dims)
+        p, t = off_pred[..., dims], off_true[..., dims]
+        if len(dims) == 4 and dims[0] in quats:
+            a = anchor[..., dims]
+            errors[f"{name}_deg"] = quaternion_angle_deg(a + p, a + t)
+        elif len(dims) == 3:
+            errors[f"{name}_mm"] = np.linalg.norm(p - t, axis=-1) * POSITION_TO_MM
+        else:
+            errors[f"{name}_raw"] = np.abs(p - t).mean(axis=-1)
+    for key, e in errors.items():
+        for s in steps:
+            if s <= e.shape[1]:
+                m[f"chunk/{key}/step_{s:02d}"] = float(e[:, s - 1].mean())
+        m[f"chunk/{key}/mean"] = float(e.mean())
+    return m
 
 
 # --- E: reporting ---

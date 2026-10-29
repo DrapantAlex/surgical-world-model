@@ -149,6 +149,70 @@ def state_delta_factor(stats):
     std = np.asarray(stats["observation.state"]["std"], dtype=np.float32)
     return scale / (std + 1e-8)
 
+def action_groups(names):
+    """E8: action dims that share one chunk scale. Every quaternion is one group; the other
+    dims are grouped by name prefix ("kuka_pose.x/y/z" -> one group); a dim with no shared
+    prefix (e.g. "psm1_jaw_sp") is a group of its own. Returns lists of indices, in order."""
+    quat = {s: list(range(s, s + 4)) for s in quaternion_starts(names)}
+    in_quat = {i for g in quat.values() for i in g}
+    groups, by_prefix = [], {}
+    for i, n in enumerate(names):
+        if i in quat:
+            groups.append(quat[i])
+        elif i not in in_quat:
+            prefix = n.rsplit(".", 1)[0] if "." in n else n
+            if prefix not in by_prefix:
+                by_prefix[prefix] = []
+                groups.append(by_prefix[prefix])
+            by_prefix[prefix].append(i)
+    return groups
+
+def compute_chunk_scale(episodes, root=ROOT, quat_ref=None, k=16, floor_c=0.25):
+    """E8 (option C): scale of the chunk offsets o_i = a(t+i) - a(t-1), i = 0..k-1, from the
+    given (training) episodes, raw units. One number per step and group: the group norm
+    ||o_i,g||, scale = max(median, floor_c x mean). Valid t: 1 <= t <= T-k (anchor and the
+    whole chunk in the same episode). Saved in norm_stats.json as "action_chunk"."""
+    groups = action_groups(feature_names(root)[1])
+    norms = []                                       # per episode: (n_t, k, n_groups)
+    for ep in episodes:
+        a = load_table(ep, root, quat_ref)[1].astype(np.float64)
+        T = len(a)
+        if T < k + 1:
+            continue                                 # too short for one chunk
+        t = np.arange(1, T - k + 1)
+        offsets = a[t[:, None] + np.arange(k)] - a[t - 1][:, None]   # (n_t, k, action_dim)
+        norms.append(np.stack([np.linalg.norm(offsets[..., g], axis=-1) for g in groups], -1))
+    norms = np.concatenate(norms)
+    scale = np.maximum(np.median(norms, axis=0), floor_c * norms.mean(axis=0))   # (k, n_groups)
+    if (scale <= 0).any():
+        raise ValueError(f"chunk steps/groups that never move in the train split: "
+                         f"{np.argwhere(scale <= 0).tolist()}")
+    return {"k": k, "anchor": "t-1", "groups": groups, "scale": scale.tolist(), "floor_c": floor_c}
+
+def chunk_scale_per_dim(stats):
+    """scale[i, group(d)] spread over the dims of each group, shape (k, action_dim), raw units."""
+    c = stats["action_chunk"]
+    per_dim = np.empty((c["k"], len(stats["action"]["std"])), np.float32)
+    for g, dims in enumerate(c["groups"]):
+        per_dim[:, dims] = np.asarray(c["scale"], np.float32)[:, g:g + 1]
+    return per_dim
+
+def chunk_factor(stats):
+    """F[i, d] = std_d / scale[i, group(d)], shape (k, action_dim): the chunk target is
+    (a_n(t+i) - a_n(t-1)) * F = o_i / scale (the mean cancels in the difference)."""
+    std = np.asarray(stats["action"]["std"], dtype=np.float32)
+    return (std + 1e-8) / chunk_scale_per_dim(stats)
+
+def chunk_anchors(split, t):
+    """E8: a_n(t-1) (the anchor) and a_n(t-2) for the constant-velocity baseline, normalised.
+    Where t-2 is not in t's episode (t = 1), a_n(t-1) is returned again: velocity 0."""
+    t = np.asarray(t)
+    before = np.maximum(t - 2, 0)
+    same = (t >= 2) & (split["episode_index"][before] == split["episode_index"][t])
+    anchor = split["actions"][t - 1]
+    prev = np.where(same[:, None], split["actions"][before], anchor)
+    return anchor, prev
+
 def save_norm_stats(stats, path):
     Path(path).write_text(json.dumps(stats, indent=2))
 
@@ -314,7 +378,7 @@ def cached_frames(split, episodes, camera=CAMERA, size=IMG_SIZE, root=ROOT, cach
 
 # --- F: many episodes (a whole split) ---
 def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episodes=None,
-               use_cache=True, cache_dir=CACHE_DIR, quat_ref=None, with_frames=True):
+               use_cache=True, cache_dir=CACHE_DIR, quat_ref=None, with_frames=True, chunk=None):
     """Load every episode of a split ("train" or "val") into flat arrays.
 
     Each frame is stored once (uint8). `pair_index` lists the positions t whose
@@ -327,6 +391,8 @@ def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episo
     subsets decode their videos directly and never touch the cache.
     `with_frames=False` (state-only models): tables only, "frames" is None. Episodes are
     still filtered by video, so the pairs are exactly those of an image model.
+    `chunk=k` (E8): pairs are the t with a(t-1) .. a(t+k-1) in the episode (1 <= t <= T-k),
+    and the split carries "chunk_factor" (needs stats["action_chunk"]) for get_pairs.
     """
     check_split(split)
     from_cache = with_frames and use_cache and episodes is None
@@ -365,7 +431,10 @@ def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episo
         states[start:start + T] = normalise(ep_states, stats, "observation.state")
         actions[start:start + T] = normalise(ep_actions, stats, "action")
         episode_index[start:start + T] = ep
-        pair_index.append(np.arange(start, start + T - 1))   # last frame has no t+1
+        if chunk is None:
+            pair_index.append(np.arange(start, start + T - 1))   # last frame has no t+1
+        else:   # E8: anchor t-1 and the whole chunk in the episode (t+1 is then inside too)
+            pair_index.append(np.arange(start + 1, start + T - chunk + 1))
         start += T
 
     return {
@@ -376,7 +445,17 @@ def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episo
         "pair_index": np.concatenate(pair_index),  # (P,) valid t, with t+1 = t + 1
         "skipped_episodes": skipped,      # episodes dropped: no video for `camera`
         "stats": stats,
+        **({} if chunk is None else {"chunk_factor": chunk_factor(stats)}),   # E8: (k, action_dim)
     }
+
+
+def chunk_targets(data, t):
+    """E8: (a_n(t+i) - a_n(t-1)) * F for i = 0..k-1, shape (B, k, action_dim): the chunk
+    offsets in option-C units. Used by get_pairs and by the label-only baselines."""
+    F = data["chunk_factor"]                       # (k, action_dim)
+    steps = t[:, None] + np.arange(len(F))         # (B, k): t, t+1, ..., t+k-1
+    anchor = data["actions"][t - 1][:, None]       # (B, 1, D): a_n(t-1), the last command
+    return ((data["actions"][steps] - anchor) * F).astype(np.float32)
 
 
 def get_pairs(data, idx):
@@ -396,4 +475,6 @@ def get_pairs(data, idx):
         "next_state_output": data["states"][t + 1],    # world model: state t+1
         "next_image_output": images_t1,                # world model: frame t+1
     }
+    if "chunk_factor" in data:   # E8: the actor imitates the chunk offsets instead
+        targets["action_output"] = chunk_targets(data, t)
     return inputs, targets

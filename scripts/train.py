@@ -12,6 +12,7 @@ The test split is never loaded.
   python -m scripts.train --dataset-root data/open_h/Surgical/jhu/imerse/star_il/star_il
   python -m scripts.train ... --w-next-state 0 --w-next-image 0   # world model off (actor only)
   python -m scripts.train ... --state-delta   # E7: WM state head predicts the change (skip)
+  python -m scripts.train ... --chunk 16      # E8: actor predicts 16 offsets from a(t-1)
 """
 import argparse
 import json
@@ -38,6 +39,7 @@ LOSS_WEIGHTS = {"action_output": 1.0, "next_state_output": 1.0, "next_image_outp
 MONITOR = "val_action_output_loss"     # best checkpoint and early stopping
 WANDB_PROJECT = "surgical-world-model"
 DELTA_FLOOR_C = 0.25   # --state-delta: scale = max(median|Δ|, DELTA_FLOOR_C * mean|Δ|) per dim
+CHUNK_FLOOR_C = 0.25   # --chunk: scale = max(median, CHUNK_FLOOR_C * mean) of each group's offset norm
 OUTPUTS, LOGS = Path("outputs"), Path("logs")
 
 
@@ -71,6 +73,9 @@ def parse_args():
     p.add_argument("--state-delta", action="store_true",
                    help="E7: state head predicts the change f, next_state = state + f (skip); "
                         "loss = Huber on Δ / scale (scale saved in norm_stats.json)")
+    p.add_argument("--chunk", type=int, default=None,
+                   help="E8: actor predicts this many offsets a(t+i) - a(t-1), option-C scale "
+                        "per step and group (saved in norm_stats.json); default: a(t) only")
     p.add_argument("--vis-every", type=int, default=5, help="timeline image every N epochs")
     p.add_argument("--wandb-mode", choices=["online", "offline", "disabled"], default="online")
     p.add_argument("--deterministic", action="store_true", help="deterministic TF ops (slower)")
@@ -137,7 +142,7 @@ def build_model(cfg, stats):
                                     latent_dim=cfg["latent_dim"], encoder=cfg["encoder"],
                                     freeze_encoder=cfg["freeze_encoder"],
                                     unfreeze_last_n=cfg["unfreeze_last_n"],
-                                    delta_factor=factor)
+                                    delta_factor=factor, action_chunk=cfg.get("chunk"))
     model.compile(optimizer=keras.optimizers.Adam(learning_rate=cfg["lr"]),
                   loss={"action_output": keras.losses.Huber(),
                         "next_state_output": "mse" if factor is None else scaled_huber(factor),
@@ -147,17 +152,22 @@ def build_model(cfg, stats):
 
 def evaluate(model, val, stats, batch_size, root, factor=None):
     """Predict every val pair (fixed order) and measure it with models/metrics.py."""
-    pred_action, pred_state, image = [], [], metrics.ImageMSE()
+    pred_action, true_action, pred_state, image = [], [], [], metrics.ImageMSE()
     for inputs, targets in make_dataset(val, batch_size, shuffle=False):
         a, s, img = model(inputs, training=False)
         pred_action.append(a.numpy())
+        true_action.append(targets["action_output"].numpy())
         pred_state.append(s.numpy())
         image.update(img.numpy(), targets["next_image_output"].numpy())
     t = val["pair_index"]
     physical = metrics.has_tissue_lift_layout(root)   # else core metrics only, no "extra/"
     state_names, action_names = data.feature_names(root)
-    m = metrics.action_metrics(np.concatenate(pred_action), val["actions"][t], stats, physical,
-                               action_names)
+    if "chunk_factor" in val:   # E8: offsets in option-C units, per step, in mm / deg
+        m = metrics.chunk_metrics(np.concatenate(pred_action), np.concatenate(true_action),
+                                  data.chunk_anchors(val, t)[0], stats, action_names)
+    else:
+        m = metrics.action_metrics(np.concatenate(pred_action), val["actions"][t], stats,
+                                   physical, action_names)
     m.update(metrics.next_state_metrics(np.concatenate(pred_state), val["states"][t + 1], stats,
                                         physical, state_names))
     if factor is not None:   # E7: the loss on the change, model vs f = 0
@@ -166,11 +176,25 @@ def evaluate(model, val, stats, batch_size, root, factor=None):
     m.update(metrics.next_image_metrics(image))
     return m
 
-def comparison_table(model_name, model_metrics, root, canonical=False):
+def chunk_baseline_metrics(val, stats, root):
+    """E8: stand-still and constant velocity on the same val pairs, through the same
+    metrics.chunk_metrics as the model (labels only)."""
+    t = val["pair_index"]
+    true = data.chunk_targets(val, t)   # the get_pairs target, without loading frames
+    anchor_n, prev_n = data.chunk_anchors(val, t)
+    names = data.feature_names(root)[1]
+    return {who: metrics.chunk_metrics(pred, true, anchor_n, stats, names)
+            for who, pred in metrics.chunk_baselines(anchor_n, prev_n, stats).items()}
+
+def comparison_table(model_name, model_metrics, root, canonical=False, chunk_baselines=None):
     """The model's metrics next to the baselines (if scripts/baselines.py has been run
     on the same dataset and quaternion convention; baselines.json files without
-    "dataset_root" are tissue lift)."""
+    "dataset_root" are tissue lift). E8 chunk runs: next to their own chunk baselines,
+    because the one-step baselines measure a different target."""
     columns = {model_name: model_metrics}
+    if chunk_baselines is not None:
+        columns.update(chunk_baselines)
+        return metrics.format_table(columns)
     path = baselines_json(canonical)
     if path.exists():
         baselines = json.loads(path.read_text())
@@ -271,11 +295,15 @@ def train(args):
     stats = data.compute_norm_stats(train_eps, root, quat_ref)
     if args.state_delta:   # E7: Δ scale from the full train split, like the norm stats
         stats["state_delta"] = data.compute_delta_scale(train_eps, root, quat_ref, DELTA_FLOOR_C)
+    if args.chunk:   # E8: option-C chunk scale from the full train split, like the norm stats
+        stats["action_chunk"] = data.compute_chunk_scale(train_eps, root, quat_ref, args.chunk,
+                                                         CHUNK_FLOOR_C)
     data.save_norm_stats(stats, out / "norm_stats.json")
     train_split = data.load_split("train", root=root, stats=stats, quat_ref=quat_ref,
-                                  episodes=episodes_for("train", args.max_episodes, root))
+                                  episodes=episodes_for("train", args.max_episodes, root),
+                                  chunk=args.chunk)
     val = data.load_split("val", root=root, stats=stats, quat_ref=quat_ref,
-                          episodes=episodes_for("val", args.max_episodes, root))
+                          episodes=episodes_for("val", args.max_episodes, root), chunk=args.chunk)
     train_ds = make_dataset(train_split, args.batch_size, shuffle=True, seed=args.seed)
     val_ds = make_dataset(val, args.batch_size, shuffle=False)
 
@@ -329,6 +357,9 @@ def train(args):
     # --- E: evaluate the BEST weights with the same metrics as the baselines ---
     model.load_weights(str(out / "best.weights.h5"))
     val_metrics = evaluate(model, val, stats, args.batch_size, root, factor)
+    chunk_base = chunk_baseline_metrics(val, stats, root) if args.chunk else None
+    if chunk_base is not None:
+        save_json(chunk_base, out / "chunk_baselines.json")
     monitored = history.history[MONITOR]
     cfg.update(epochs_run=len(monitored), best_epoch=int(np.argmin(monitored)) + 1,
                train_time_min=round(train_time_min, 2))
@@ -340,7 +371,7 @@ def train(args):
 
     print(f"\nbest epoch {cfg['best_epoch']} of {cfg['epochs_run']}, "
           f"training {train_time_min:.1f} min\n")
-    print(comparison_table(run_name, val_metrics, root, args.canonical_quaternion))
+    print(comparison_table(run_name, val_metrics, root, args.canonical_quaternion, chunk_base))
     if args.max_episodes is None:
         metrics.append_results({"run_name": run_name, "dataset": root.name,
                                 "encoder": args.encoder,
@@ -349,7 +380,8 @@ def train(args):
                                 "latent_dim": args.latent_dim,
                                 "w_next_state": args.w_next_state,
                                 "w_next_image": args.w_next_image,
-                                "state_delta": args.state_delta, "epochs": cfg["epochs_run"],
+                                "state_delta": args.state_delta, "chunk": args.chunk,
+                                "epochs": cfg["epochs_run"],
                                 "best_epoch": cfg["best_epoch"],
                                 "train_time_min": cfg["train_time_min"], **val_metrics})
         print(f"\nadded a row to {metrics.RESULTS_CSV}")
@@ -366,12 +398,15 @@ def eval_only(args):
     root = dataset_root(cfg)
     quat_ref = run_quat_ref(cfg, out)
     val = data.load_split("val", root=root, stats=stats, quat_ref=quat_ref,
-                          episodes=episodes_for("val", cfg["max_episodes"], root))
+                          episodes=episodes_for("val", cfg["max_episodes"], root),
+                          chunk=cfg.get("chunk"))   # runs before E8: no "chunk" key
     model = build_model(cfg, stats)
     model.load_weights(str(out / "best.weights.h5"))
     val_metrics = evaluate(model, val, stats, cfg["batch_size"], root, delta_factor(cfg, stats))
     save_json(val_metrics, out / "val_metrics_reeval.json")
-    print(comparison_table(f"{args.run_name} (re-eval)", val_metrics, root, quat_ref is not None))
+    chunk_base = chunk_baseline_metrics(val, stats, root) if cfg.get("chunk") else None
+    print(comparison_table(f"{args.run_name} (re-eval)", val_metrics, root, quat_ref is not None,
+                           chunk_base))
 
     saved = out / "val_metrics.json"
     if saved.exists():
