@@ -526,3 +526,68 @@ Script for the per-joint numbers: `scripts/look_state_delta.py`.
 - [ ] E7 results: action error vs E6, and WM Huber vs f = 0.
 - [ ] Send the open questions to Michael.
 - [ ] Chunked actor (k = 16) + 6D, option C normalisation.
+
+---
+
+## 2026-10-29
+
+### Today in five lines
+
+- E7 (WM predicts Δstate) **failed**: the actor got ~12× worse, and the WM never beat "no motion" on val.
+- Two label-only diagnostics (D1, D2) explain why: one-frame Δ can't be predicted from the WM inputs, so the WM memorised the train episodes.
+- E7 also made the state loss ~1000× the action loss, so that memorisation took over the shared encoder.
+- Michael's design (predict the absolute state, then subtract) is E1: the change in E7 was the loss scale, not the architecture.
+- Decision: keep the E1 world model, and make the **actor** predict motion (chunk of 16 offsets) → E8 / E9.
+
+### E7 results (3 seeds, 51 val episodes)
+
+| | E1 (abs. state) | E6 (WM off) | E7 (Δ state) |
+|---|---|---|---|
+| val action Huber (best) | 0.0027–0.0031 | 0.0026–0.0035 | 0.032–0.041 |
+| best epoch / epochs run | 45–100 | 74–100 | 1 / 11 |
+| WM state Huber vs "f = 0" (val) | – | – | 3.07–3.11 vs 2.955 |
+
+Every seed: val action rises from epoch 1 (0.032 → 0.063), train action fits ~20× worse than E1, and the state loss is ~200× (epoch 1) to ~900× (epoch 11) the action loss (in E1 they were ~1:1).
+
+### D1: "no motion" on each split
+
+Script: `scripts/look_delta_reference.py` (labels only). It reproduces E7's logged 2.955, so the target is the same as in training.
+
+| | f = 0 | E7 head, epoch 1 | E7 head, epoch 11 |
+|---|---|---|---|
+| train | 3.59 | 3.49 | 2.10 |
+| val | 2.955 | 3.1 | 4.0 |
+
+**Memorisation, not a train/val shift**: below "no motion" on train, above it on val. A constant (the train mean motion) is worse than 0 on both splits.
+
+### D2: can the one-frame Δ be predicted without the image?
+
+Script: `scripts/look_delta_predictability.py`. Probes on train (ridge, MLP 2×256 Huber), val Huber relative to f = 0:
+
+| Inputs | Best probe | val / (f = 0) |
+|---|---|---|
+| s, a (the WM inputs minus the image) | ridge | 1.13 (MLP: 1.23, same pattern as E7) |
+| s, a, a(t) − a(t−1) | MLP | 0.63 |
+| constant velocity f(t−1), no learning | – | 0.50 |
+| s, a, f(t−1) | MLP | 0.42 |
+
+- From absolute values, the network can't resolve a change of ~1/1000 of their spread. The same information given as a difference is learnable.
+- The motion is smooth: history predicts it well. The WM inputs have no history.
+
+**Conclusion on E7:** the target was not identifiable from the WM inputs, and the amplified loss let the memorisation damage the actor. E1 asked for the same information (the motion), but so quietly that the WM just copied the state.
+
+### Decision: E8 = chunked actor on the E1 architecture
+
+- WM unchanged (absolute s(t+1), MSE, same inputs). Only the actor target changes.
+- k = 16; target = offsets from the last command, a(t+i) − a(t−1), i = 0..15.
+- Quaternions as now, component difference; reconstruct with normalise(q(t−1) + Δq).
+- Option C: one scale per group (position, rotation) per step = max(median, 0.25 × mean) of the group norm, train only; Huber.
+- Baselines on the same pairs: stand-still (a(t−1)) and constant velocity.
+- E9 = E8 with the WM off, same commit.
+- Expect step 1 ≈ stand-still (D2). The test is steps 4–16.
+
+### Next steps
+
+- [ ] E8 code: groups + chunk scale, chunk pairs/targets, per-step metrics + baselines, chunk head, `--chunk` flag.
+- [ ] E8 / E9, 3 seeds each.
+- [ ] Send the open questions to Michael.
