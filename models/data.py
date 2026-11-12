@@ -1,4 +1,5 @@
 """Load Open-H (LeRobot v2.1) episodes and build world-model triplets."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -72,6 +73,69 @@ def load_table(episode, root=ROOT, quat_ref=None):
     return states, actions
 
 
+# --- B1: keep ranges (optional: use only part of each episode) ---
+# A CSV "episode, first_visible, last_visible" (inclusive frame indices) says which rows of
+# each episode are kept, e.g. configs/keep_ranges/star_il_tool_visible.csv (frames where the
+# tool is in view). Kept = [lo, hi]. Frames are never deleted: only the pairs and the
+# statistics are restricted, so the frame cache stays valid. None = the whole episode.
+def load_keep_ranges(path):
+    """{episode: (first, last)}; an empty first/last cell = keep nothing (None)."""
+    df = pd.read_csv(path)
+    missing = {"episode", "first_visible", "last_visible"} - set(df.columns)
+    if missing:
+        raise ValueError(f"{path}: missing columns {sorted(missing)}")
+    return {int(r.episode): None if pd.isna(r.first_visible) or pd.isna(r.last_visible)
+            else (int(r.first_visible), int(r.last_visible)) for r in df.itertuples()}
+
+def check_keep_ranges(keep_ranges, root=ROOT, camera=CAMERA):
+    """The file must list exactly the train + val episodes of this dataset (after
+    drop_missing_videos). Catches a file made for another dataset or another split, where
+    every range might still happen to fit its episode."""
+    expected = set()
+    for split in ALLOWED_SPLITS:
+        kept, _ = drop_missing_videos(split, get_split_episodes(split, root), camera, root,
+                                      verbose=False)
+        expected |= set(kept)
+    missing, extra = sorted(expected - set(keep_ranges)), sorted(set(keep_ranges) - expected)
+    if missing or extra:
+        raise ValueError(f"keep ranges do not match train + val of {root}: "
+                         f"{len(missing)} episodes missing (first {missing[:5]}), "
+                         f"{len(extra)} not in train/val (first {extra[:5]})")
+
+def file_sha256(path):
+    """Hash of a keep-ranges file: saved with runs and baselines, so they are only
+    compared when they used exactly the same ranges."""
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+def kept_window(episode, T, keep_ranges):
+    """(lo, hi), inclusive. (0, T-1) without keep_ranges, (0, -1) (empty) for an episode
+    that keeps nothing. Raises if the episode is missing or its range does not fit."""
+    if keep_ranges is None:
+        return 0, T - 1
+    if episode not in keep_ranges:
+        raise KeyError(f"episode {episode} is not in the keep-ranges file")
+    if keep_ranges[episode] is None:
+        return 0, -1
+    lo, hi = keep_ranges[episode]
+    if not 0 <= lo <= hi <= T - 1:
+        raise ValueError(f"episode {episode}: keep range {lo}..{hi} outside 0..{T - 1}")
+    return lo, hi
+
+def load_kept_table(episode, root=ROOT, quat_ref=None, keep_ranges=None):
+    """load_table restricted to the kept rows [lo, hi]: what every statistic sees."""
+    states, actions = load_table(episode, root, quat_ref)
+    lo, hi = kept_window(episode, len(states), keep_ranges)
+    return states[lo:hi + 1], actions[lo:hi + 1]
+
+def pair_positions(lo, hi, chunk=None):
+    """Positions t whose whole window lies in [lo, hi] (empty if the window is too short):
+    plain pairs (t, t+1): t = lo .. hi-1;  chunk k (t-1 .. t+k-1): t = lo+1 .. hi-k+1.
+    With (lo, hi) = (0, T-1) these are the original rules."""
+    if chunk is None:
+        return np.arange(lo, hi)
+    return np.arange(lo + 1, hi - chunk + 2)
+
+
 # --- C: the video (frames) ---
 def video_path(episode, camera=CAMERA, root=ROOT):
     info = load_info(root)
@@ -109,17 +173,18 @@ def unnormalise(x, stats, key):
     std = np.asarray(stats[key]["std"], dtype=np.float32)
     return x * (std + 1e-8) + mean
 
-def compute_norm_stats(episodes, root=ROOT, quat_ref=None):
+def compute_norm_stats(episodes, root=ROOT, quat_ref=None, keep_ranges=None):
     """Mean/std of state and action over the given (training) episodes only.
     Same layout as stats.json, so normalise() works with it.
     quat_ref: computed on canonicalised quaternions (must match load_split's quat_ref).
+    keep_ranges (B1): only the kept rows of each episode.
     Raises (never falls back) if any episode's table is missing."""
     missing = [ep for ep in episodes if not table_path(ep, root).exists()]
     if not episodes or missing:
         raise FileNotFoundError(
             f"cannot compute normalisation stats for {root}: {len(missing)} of "
             f"{len(episodes)} episodes have no parquet file (first: {missing[:10]})")
-    states, actions = zip(*(load_table(ep, root, quat_ref) for ep in episodes))
+    states, actions = zip(*(load_kept_table(ep, root, quat_ref, keep_ranges) for ep in episodes))
     stats = {}
     for key, x in [("observation.state", np.concatenate(states)),
                    ("action", np.concatenate(actions))]:
@@ -128,11 +193,11 @@ def compute_norm_stats(episodes, root=ROOT, quat_ref=None):
         stats[key] = {"mean": mean.tolist(), "std": std.tolist()}
     return stats
 
-def compute_delta_scale(episodes, root=ROOT, quat_ref=None, floor_c=0.25):
+def compute_delta_scale(episodes, root=ROOT, quat_ref=None, floor_c=0.25, keep_ranges=None):
     """E7: per-dimension scale of the one-frame state change Δ = s(t+1) - s(t), from the
-    given (training) episodes, raw units, pairs within an episode only.
+    given (training) episodes, raw units, pairs within an episode (and its kept rows) only.
     The world-model state target is Δ / scale. Saved in norm_stats.json as "state_delta"."""
-    deltas = [np.diff(load_table(ep, root, quat_ref)[0].astype(np.float64), axis=0)
+    deltas = [np.diff(load_kept_table(ep, root, quat_ref, keep_ranges)[0].astype(np.float64), axis=0)
               for ep in episodes]
     abs_delta = np.abs(np.concatenate(deltas))   # (P, state_dim)
     median = np.median(abs_delta, axis=0)        # typical change per joint, shape (8,)
@@ -167,15 +232,16 @@ def action_groups(names):
             by_prefix[prefix].append(i)
     return groups
 
-def compute_chunk_scale(episodes, root=ROOT, quat_ref=None, k=16, floor_c=0.25):
+def compute_chunk_scale(episodes, root=ROOT, quat_ref=None, k=16, floor_c=0.25, keep_ranges=None):
     """E8 (option C): scale of the chunk offsets o_i = a(t+i) - a(t-1), i = 0..k-1, from the
     given (training) episodes, raw units. One number per step and group: the group norm
     ||o_i,g||, scale = max(median, floor_c x mean). Valid t: 1 <= t <= T-k (anchor and the
-    whole chunk in the same episode). Saved in norm_stats.json as "action_chunk"."""
+    whole chunk in the same episode; with keep_ranges, T = the kept rows, so the window
+    stays inside them). Saved in norm_stats.json as "action_chunk"."""
     groups = action_groups(feature_names(root)[1])
     norms = []                                       # per episode: (n_t, k, n_groups)
     for ep in episodes:
-        a = load_table(ep, root, quat_ref)[1].astype(np.float64)
+        a = load_kept_table(ep, root, quat_ref, keep_ranges)[1].astype(np.float64)
         T = len(a)
         if T < k + 1:
             continue                                 # too short for one chunk
@@ -245,11 +311,13 @@ def average_quaternion(qs):
     _, vecs = np.linalg.eigh(qs.T @ qs)
     return vecs[:, -1]
 
-def compute_quat_reference(episodes, root=ROOT):
-    """{key: [{"start", "names", "q", "max_angle_deg"}]} from the given (training) episodes.
+def compute_quat_reference(episodes, root=ROOT, keep_ranges=None):
+    """{key: [{"start", "names", "q", "max_angle_deg"}]} from the given (training) episodes
+    (with keep_ranges: their kept rows only, like every other statistic).
     Raises if neither state nor action contains a quaternion (the option would do nothing)."""
     names = dict(zip(QUAT_KEYS, feature_names(root)))
-    states, actions = zip(*(load_table(ep, root) for ep in episodes))   # raw signs
+    states, actions = zip(*(load_kept_table(ep, root, None, keep_ranges)   # raw signs
+                            for ep in episodes))
     tables = {"observation.state": np.concatenate(states), "action": np.concatenate(actions)}
     ref = {}
     for key in QUAT_KEYS:
@@ -378,7 +446,8 @@ def cached_frames(split, episodes, camera=CAMERA, size=IMG_SIZE, root=ROOT, cach
 
 # --- F: many episodes (a whole split) ---
 def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episodes=None,
-               use_cache=True, cache_dir=CACHE_DIR, quat_ref=None, with_frames=True, chunk=None):
+               use_cache=True, cache_dir=CACHE_DIR, quat_ref=None, with_frames=True, chunk=None,
+               keep_ranges=None):
     """Load every episode of a split ("train" or "val") into flat arrays.
 
     Each frame is stored once (uint8). `pair_index` lists the positions t whose
@@ -393,6 +462,9 @@ def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episo
     still filtered by video, so the pairs are exactly those of an image model.
     `chunk=k` (E8): pairs are the t with a(t-1) .. a(t+k-1) in the episode (1 <= t <= T-k),
     and the split carries "chunk_factor" (needs stats["action_chunk"]) for get_pairs.
+    `keep_ranges` (B1): pairs only where the whole window (t, t+1 or t-1 .. t+k-1) lies in
+    the episode's kept rows; frames, states and actions stay complete (the cache is unchanged).
+    "n_pairs_untrimmed" = the count without keep_ranges, for comparison.
     """
     check_split(split)
     from_cache = with_frames and use_cache and episodes is None
@@ -402,7 +474,7 @@ def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episo
     if stats is None:
         train_eps, _ = drop_missing_videos("train", get_split_episodes("train", root),
                                            camera, root, verbose=False)
-        stats = compute_norm_stats(train_eps, root, quat_ref)
+        stats = compute_norm_stats(train_eps, root, quat_ref, keep_ranges)
 
     # allocate once, so all frames never exist twice in memory
     lengths = load_episode_lengths(root)
@@ -418,6 +490,7 @@ def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episo
     actions = np.empty((N, action_dim), np.float32)
     episode_index = np.empty(N, np.int64)
     pair_index = []
+    n_untrimmed = 0
 
     start = 0
     for ep in episodes:
@@ -431,18 +504,23 @@ def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episo
         states[start:start + T] = normalise(ep_states, stats, "observation.state")
         actions[start:start + T] = normalise(ep_actions, stats, "action")
         episode_index[start:start + T] = ep
-        if chunk is None:
-            pair_index.append(np.arange(start, start + T - 1))   # last frame has no t+1
-        else:   # E8: anchor t-1 and the whole chunk in the episode (t+1 is then inside too)
-            pair_index.append(np.arange(start + 1, start + T - chunk + 1))
+        # plain: t and t+1 in the kept rows; E8 chunk: anchor t-1 and the whole chunk in them
+        lo, hi = kept_window(ep, T, keep_ranges)                 # (0, T-1) without keep_ranges
+        pair_index.append(start + pair_positions(lo, hi, chunk))
+        n_untrimmed += len(pair_positions(0, T - 1, chunk))
         start += T
 
+    pair_index = np.concatenate(pair_index)
+    if keep_ranges is not None:
+        print(f"{split}: {len(pair_index)} pairs kept of {n_untrimmed} "
+              f"({len(pair_index) / max(n_untrimmed, 1) - 1:+.1%}, keep ranges)")
     return {
         "frames": frames,                 # (N, size, size, 3) uint8, or None (with_frames=False)
         "states": states,                 # (N, state_dim) normalised
         "actions": actions,               # (N, action_dim) normalised
         "episode_index": episode_index,   # (N,) which episode each frame is from
-        "pair_index": np.concatenate(pair_index),  # (P,) valid t, with t+1 = t + 1
+        "pair_index": pair_index,         # (P,) valid t, with t+1 = t + 1
+        "n_pairs_untrimmed": n_untrimmed, # P without keep_ranges (= P when it is None)
         "skipped_episodes": skipped,      # episodes dropped: no video for `camera`
         "stats": stats,
         **({} if chunk is None else {"chunk_factor": chunk_factor(stats)}),   # E8: (k, action_dim)

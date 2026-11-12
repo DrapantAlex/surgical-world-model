@@ -591,3 +591,88 @@ Script: `scripts/look_delta_predictability.py`. Probes on train (ridge, MLP 2×2
 - [ ] E8 code: groups + chunk scale, chunk pairs/targets, per-step metrics + baselines, chunk head, `--chunk` flag.
 - [ ] E8 / E9, 3 seeds each.
 - [ ] Send the open questions to Michael.
+
+---
+
+## 2026-11-12
+
+### Today in five lines
+
+- In many STAR-IL episodes the tool is out of view, mostly at the end. I checked whether the camera calibration can detect those frames: it can.
+- The commanded tool position, projected into the endoscope image, lands on (slightly above) the tool tip, and its entry/exit frames match my hand annotations within a few frames.
+- Over train + val, 11.8% of frames have the tool out of view (train 12.2%, val 8.3%), about 85% of them at the end of an episode.
+- I implemented trimming: each episode keeps only [first visible, last visible] frame, for the pairs and for every train statistic (`--keep-ranges`).
+- Re-evaluating E8 on the trimmed val pairs shows that E8 is at stand-still level (ratio 1.00 untrimmed, 1.016 trimmed). Trimming removes easy frames; it doesn't fix the actor.
+
+### Step 1: does the projection find the tool?
+
+Script: `scripts/look_tool_projection.py` (inspection only, no change to the model).
+
+**Maths** (all numbers read from the dataset folder):
+- the transform file gives the camera pose in the world (p_world = R p_cam + t), so world → camera is **p_cam = Rᵀ (p_world − t)**;
+- pinhole at the calibration size (848×480), u = fx X/Z + cx, v = fy Y/Z + cy, then rescaled per axis to the video (960×540);
+- visible ⇔ Z > 0 and the point lies inside the image;
+- distortion only moves the drawn dot. The plumb_bob polynomial (k3 < 0) can fold points far outside the image back inside, so visibility is decided on the undistorted point.
+
+**What I checked:**
+
+| Check | Result |
+|---|---|
+| Ranges (10 train episodes) | Z > 0 in 100% of frames, depth 0.05–0.17 m: same frame, right direction, right units |
+| Dot test (8 frames per episode) | dot on, slightly above, the tool tip; "OUT" with v < 0 (above the image) when the tool is withdrawn |
+| Timing strips (`--strips`, 8 episodes) | projected entry/exit = first frame of the new state; matches the real tip entry/exit within a few frames (`timing_validation.csv`) |
+
+**Lag:** `--lag-frames k` is a pure shift (projected frame + k), so annotating once is enough and the mean error is itself an estimate of the lag. **Decision:** lag 0, no margin. This is conservative: frames where only a few pixels of the tool remain count as invisible.
+
+### Step 2: how many frames are invisible? (`--all`, tables only)
+
+| | train (409 ep.) | val (51 ep.) |
+|---|---|---|
+| invisible frames | 12.2% | 8.3% |
+| … start / end / middle | 1.8 / 10.2 / 0.2% | 0.6 / 7.6 / 0.1% |
+| trail (end), seconds: mean / median / max | 1.44 / 1.10 / 13.2 | 1.00 / 0.00 / 6.2 |
+| episodes: fully visible / middle absence / fully invisible | 175 / 14 / 0 | 29 / 3 / 0 |
+| chunk-16 pairs, before → after trimming | 167,491 → 146,609 (−12.5%) | 19,346 → 17,692 (−8.5%) |
+
+- **The problem is the end of the episode.** More than half of train episodes end with the tool out of view.
+- **Middle absences are negligible** (0.2%), and each affected episode has a single absence. They are kept.
+- **Outliers:** episode 317 has a 13.2 s tail (half the episode); episodes 393, 343, 369 and 434 have 6–7 s.
+- **Val has fewer invisible frames than train**, so trimming changes train more than val.
+
+### Step 3: trimming (implemented by Claude Code)
+
+| File | Change in plain words |
+|---|---|
+| `configs/keep_ranges/star_il_tool_visible.csv` | tracked file `episode, first_visible, last_visible` (460 rows, train + val); regenerated exactly by `look_tool_projection --all --export-keep-ranges`; rule, command and result in its `README.md` |
+| `data.py` | section B1: `load_keep_ranges`, `kept_window`, `load_kept_table`, `pair_positions`, `check_keep_ranges`, `file_sha256`. Pairs only where the whole window (t, t+1 or t−1 … t+15) lies in the kept range. Norm stats, quaternion reference, delta and chunk scales read only kept rows. Frames are not deleted, so the cache stays valid. `data.py` knows nothing about the projection. |
+| `train.py` | `--keep-ranges`: the file is copied into the run folder with its hash; `--eval-only` reads the copy and checks the hash; `--eval-keep-ranges` evaluates any run on other val pairs (separate JSON); `keep_ranges` column in `results.csv`; baselines are only compared on the same hash |
+| `baselines.py` | `--keep-ranges`, output in `outputs/baselines[_canonical]_trimmed/` |
+
+**Safety checks:**
+- a missing episode raises an error;
+- a file whose episodes ≠ train + val of the dataset is rejected before the run folder exists (this caught a tissue-lift run with the STAR-IL file);
+- old runs load as before: recomputing E8's stats without keep ranges reproduces its `norm_stats.json` exactly.
+
+**Trimming changes the normalisation:** the train std of action z drops from 29.6 mm to 20.6 mm, because the tail is the tool being lifted out. **Normalised losses of trimmed and untrimmed runs are not comparable.** Compare them in mm / degrees, or as a ratio to the stand-still baseline on the same pairs.
+
+### E8 on the trimmed val pairs (same weights, `--eval-keep-ranges`)
+
+3 seeds, mean of the 16 steps, model / stand-still on the same pairs:
+
+| | pairs | position mm | ratio | rotation deg | ratio |
+|---|---|---|---|---|---|
+| untrimmed val | 19,346 | 2.981 ± 0.034 (stand-still 2.986, const. vel. 2.573) | 0.998 ± 0.011 | 0.578 ± 0.003 | 1.005 ± 0.005 |
+| trimmed val | 17,692 | 2.807 ± 0.028 (stand-still 2.764, const. vel. 2.452) | 1.016 ± 0.010 | 0.561 ± 0.003 | 1.008 ± 0.006 |
+
+- **The error drops 6% only because the pairs are easier.** Stand-still drops by the same amount.
+- **E8 is at stand-still level**, at every step (1, 8, 16). On the visible frames it is slightly worse than doing nothing.
+- **Constant velocity beats both** in position up to about step 12. A model that uses the recent motion should at least match it.
+
+**Conclusion:** trimming makes the data cleaner, but it does not fix the actor. The bottleneck is how much the inputs (frame, state) tell the model about future motion. This is consistent with D2: from absolute values the motion is not identifiable, but from history it is.
+
+### Next steps
+
+- [ ] Trimmed E8, 3 seeds (`star-il-simplecnn-latent512-canonq-chunk16-trim-seed{0,1,2}`): target ratio < 1.016 / 1.008.
+- [ ] If they also stay at ≈ 1.0: give the actor the recent motion (a(t−1) − a(t−2), or a short history), and compare with constant velocity.
+- [ ] Commit the projection script, the keep-ranges file and the trimming code.
+- [ ] Send the open questions to Michael.

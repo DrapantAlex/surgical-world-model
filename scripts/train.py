@@ -9,13 +9,17 @@ The test split is never loaded.
 
   python -m scripts.train --run-name smoke --max-episodes 2 --epochs 2 --wandb-mode offline
   python -m scripts.train --run-name smoke --eval-only
+  python -m scripts.train --run-name <run> --eval-only --eval-keep-ranges <file>   # other val pairs
   python -m scripts.train --dataset-root data/open_h/Surgical/jhu/imerse/star_il/star_il
   python -m scripts.train ... --w-next-state 0 --w-next-image 0   # world model off (actor only)
   python -m scripts.train ... --state-delta   # E7: WM state head predicts the change (skip)
   python -m scripts.train ... --chunk 16      # E8: actor predicts 16 offsets from a(t-1)
+  python -m scripts.train ... --keep-ranges configs/keep_ranges/star_il_tool_visible.csv
+                                              # only the kept frames (pairs + statistics)
 """
 import argparse
 import json
+import shutil
 import subprocess
 import time
 from datetime import datetime
@@ -76,7 +80,13 @@ def parse_args():
     p.add_argument("--chunk", type=int, default=None,
                    help="E8: actor predicts this many offsets a(t+i) - a(t-1), option-C scale "
                         "per step and group (saved in norm_stats.json); default: a(t) only")
-    p.add_argument("--vis-every", type=int, default=5, help="timeline image every N epochs")
+    p.add_argument("--keep-ranges", default=None,
+                   help="CSV episode, first_visible, last_visible: use only those frames for "
+                        "pairs and statistics (copied into the run folder, with its hash)")
+    p.add_argument("--eval-keep-ranges", default=None,
+                   help="with --eval-only: evaluate on the pairs of THIS keep-ranges file (the "
+                        "run's own statistics), saved as val_metrics_keep_<file stem>.json")
+    p.add_argument("--vis-every",type=int, default=5, help="timeline image every N epochs")
     p.add_argument("--wandb-mode", choices=["online", "offline", "disabled"], default="online")
     p.add_argument("--deterministic", action="store_true", help="deterministic TF ops (slower)")
     p.add_argument("--eval-only", action="store_true",
@@ -88,6 +98,17 @@ def parse_args():
         p.error("--eval-only needs --run-name")
     if args.w_next_state < 0 or args.w_next_image < 0:
         p.error("loss weights must be >= 0")
+    # keep-ranges files are checked here, before the run folder exists
+    if args.eval_keep_ranges and not args.eval_only:
+        p.error("--eval-keep-ranges needs --eval-only (use --keep-ranges for training)")
+    for flag, path in (("--keep-ranges", args.keep_ranges), ("--eval-keep-ranges", args.eval_keep_ranges)):
+        if path and not Path(path).is_file():
+            p.error(f"{flag}: {path} not found")
+    if args.keep_ranges and not args.eval_only:   # exactly train + val of this dataset
+        try:
+            data.check_keep_ranges(data.load_keep_ranges(args.keep_ranges), Path(args.dataset_root))
+        except ValueError as e:
+            p.error(f"--keep-ranges: {e}")
     return args
 
 
@@ -107,10 +128,21 @@ def run_quat_ref(cfg, out):
         return None
     return data.load_quat_reference(out / "quat_reference.json")
 
-def baselines_json(canonical):
-    """Baselines measured with the same quaternion convention as the run: normalised
-    MSE is not comparable across conventions (different label std)."""
-    return OUTPUTS / ("baselines_canonical" if canonical else "baselines") / "baselines.json"
+def run_keep_ranges(cfg, out):
+    """The run's own copy of the keep-ranges file, checked against the saved hash;
+    None for runs without --keep-ranges (and runs saved before the option)."""
+    if not cfg.get("keep_ranges"):
+        return None
+    copy = out / "keep_ranges.csv"
+    if data.file_sha256(copy) != cfg["keep_ranges_sha256"]:
+        raise ValueError(f"{copy} does not match the hash in config.json")
+    return data.load_keep_ranges(copy)
+
+def baselines_json(canonical, trimmed=False):
+    """Baselines measured with the same quaternion convention (and keep ranges) as the run:
+    normalised MSE is not comparable across conventions (different label std)."""
+    name = "baselines" + ("_canonical" if canonical else "") + ("_trimmed" if trimmed else "")
+    return OUTPUTS / name / "baselines.json"
 
 def episodes_for(split, max_episodes, root):
     """None = the whole split (read from the frame cache); else its first N episodes."""
@@ -186,19 +218,22 @@ def chunk_baseline_metrics(val, stats, root):
     return {who: metrics.chunk_metrics(pred, true, anchor_n, stats, names)
             for who, pred in metrics.chunk_baselines(anchor_n, prev_n, stats).items()}
 
-def comparison_table(model_name, model_metrics, root, canonical=False, chunk_baselines=None):
+def comparison_table(model_name, model_metrics, root, canonical=False, chunk_baselines=None,
+                     keep_hash=None):
     """The model's metrics next to the baselines (if scripts/baselines.py has been run
-    on the same dataset and quaternion convention; baselines.json files without
-    "dataset_root" are tissue lift). E8 chunk runs: next to their own chunk baselines,
-    because the one-step baselines measure a different target."""
+    on the same dataset, quaternion convention and keep ranges; baselines.json files
+    without "dataset_root" are tissue lift, without "keep_ranges_sha256" untrimmed).
+    E8 chunk runs: next to their own chunk baselines, because the one-step baselines
+    measure a different target."""
     columns = {model_name: model_metrics}
     if chunk_baselines is not None:
         columns.update(chunk_baselines)
         return metrics.format_table(columns)
-    path = baselines_json(canonical)
+    path = baselines_json(canonical, trimmed=keep_hash is not None)
     if path.exists():
         baselines = json.loads(path.read_text())
-        if Path(baselines.get("dataset_root", data.ROOT)) == Path(root):
+        if (Path(baselines.get("dataset_root", data.ROOT)) == Path(root)
+                and baselines.get("keep_ranges_sha256") == keep_hash):
             columns.update(baselines["results"])
     return metrics.format_table(columns)
 
@@ -286,24 +321,33 @@ def train(args):
     root = Path(args.dataset_root)
     train_eps, _ = data.drop_missing_videos("train", data.get_split_episodes("train", root),
                                             root=root, verbose=False)
+    # optional keep ranges: copied into the run (eval-only reads the copy, checked by hash);
+    # used for every statistic below AND both splits' pairs
+    keep_ranges, keep_hash = None, None
+    if args.keep_ranges:
+        shutil.copyfile(args.keep_ranges, out / "keep_ranges.csv")
+        keep_hash = data.file_sha256(out / "keep_ranges.csv")
+        keep_ranges = data.load_keep_ranges(out / "keep_ranges.csv")   # checked in parse_args
     # optional canonical quaternion signs: reference from the full train split, saved
     # with the run, and used for the stats AND both splits (all through load_table)
     quat_ref = None
     if args.canonical_quaternion:
-        quat_ref = data.compute_quat_reference(train_eps, root)
+        quat_ref = data.compute_quat_reference(train_eps, root, keep_ranges)
         data.save_quat_reference(quat_ref, out / "quat_reference.json")
-    stats = data.compute_norm_stats(train_eps, root, quat_ref)
+    stats = data.compute_norm_stats(train_eps, root, quat_ref, keep_ranges)
     if args.state_delta:   # E7: Δ scale from the full train split, like the norm stats
-        stats["state_delta"] = data.compute_delta_scale(train_eps, root, quat_ref, DELTA_FLOOR_C)
+        stats["state_delta"] = data.compute_delta_scale(train_eps, root, quat_ref, DELTA_FLOOR_C,
+                                                        keep_ranges)
     if args.chunk:   # E8: option-C chunk scale from the full train split, like the norm stats
         stats["action_chunk"] = data.compute_chunk_scale(train_eps, root, quat_ref, args.chunk,
-                                                         CHUNK_FLOOR_C)
+                                                         CHUNK_FLOOR_C, keep_ranges)
     data.save_norm_stats(stats, out / "norm_stats.json")
     train_split = data.load_split("train", root=root, stats=stats, quat_ref=quat_ref,
                                   episodes=episodes_for("train", args.max_episodes, root),
-                                  chunk=args.chunk)
+                                  chunk=args.chunk, keep_ranges=keep_ranges)
     val = data.load_split("val", root=root, stats=stats, quat_ref=quat_ref,
-                          episodes=episodes_for("val", args.max_episodes, root), chunk=args.chunk)
+                          episodes=episodes_for("val", args.max_episodes, root), chunk=args.chunk,
+                          keep_ranges=keep_ranges)
     train_ds = make_dataset(train_split, args.batch_size, shuffle=True, seed=args.seed)
     val_ds = make_dataset(val, args.batch_size, shuffle=False)
 
@@ -323,6 +367,9 @@ def train(args):
         params_total=int(model.count_params()),
         params_trainable=int(sum(np.prod(w.shape) for w in model.trainable_weights)),
         n_train_pairs=int(len(train_split["pair_index"])), n_val_pairs=int(len(val["pair_index"])),
+        n_train_pairs_untrimmed=int(train_split["n_pairs_untrimmed"]),
+        n_val_pairs_untrimmed=int(val["n_pairs_untrimmed"]),
+        keep_ranges_sha256=keep_hash,
         train_episodes=np.unique(train_split["episode_index"]).tolist(),
         val_episodes=np.unique(val["episode_index"]).tolist(),
         train_skipped_episodes=train_split["skipped_episodes"],
@@ -371,7 +418,8 @@ def train(args):
 
     print(f"\nbest epoch {cfg['best_epoch']} of {cfg['epochs_run']}, "
           f"training {train_time_min:.1f} min\n")
-    print(comparison_table(run_name, val_metrics, root, args.canonical_quaternion, chunk_base))
+    print(comparison_table(run_name, val_metrics, root, args.canonical_quaternion, chunk_base,
+                           keep_hash))
     if args.max_episodes is None:
         metrics.append_results({"run_name": run_name, "dataset": root.name,
                                 "encoder": args.encoder,
@@ -381,6 +429,7 @@ def train(args):
                                 "w_next_state": args.w_next_state,
                                 "w_next_image": args.w_next_image,
                                 "state_delta": args.state_delta, "chunk": args.chunk,
+                                "keep_ranges": Path(args.keep_ranges).name if args.keep_ranges else None,
                                 "epochs": cfg["epochs_run"],
                                 "best_epoch": cfg["best_epoch"],
                                 "train_time_min": cfg["train_time_min"], **val_metrics})
@@ -397,16 +446,33 @@ def eval_only(args):
     stats = data.load_norm_stats(out / "norm_stats.json")
     root = dataset_root(cfg)
     quat_ref = run_quat_ref(cfg, out)
+    keep_ranges = run_keep_ranges(cfg, out)        # None: untrimmed (and older runs)
+    keep_hash = cfg.get("keep_ranges_sha256")
+    if args.eval_keep_ranges:   # other pairs, same weights and statistics (nothing recomputed)
+        keep_ranges = data.load_keep_ranges(args.eval_keep_ranges)
+        keep_hash = data.file_sha256(args.eval_keep_ranges)
+        data.check_keep_ranges(keep_ranges, root)
     val = data.load_split("val", root=root, stats=stats, quat_ref=quat_ref,
                           episodes=episodes_for("val", cfg["max_episodes"], root),
-                          chunk=cfg.get("chunk"))   # runs before E8: no "chunk" key
+                          chunk=cfg.get("chunk"),   # runs before E8: no "chunk" key
+                          keep_ranges=keep_ranges)
     model = build_model(cfg, stats)
     model.load_weights(str(out / "best.weights.h5"))
     val_metrics = evaluate(model, val, stats, cfg["batch_size"], root, delta_factor(cfg, stats))
-    save_json(val_metrics, out / "val_metrics_reeval.json")
     chunk_base = chunk_baseline_metrics(val, stats, root) if cfg.get("chunk") else None
+    if args.eval_keep_ranges:   # its own JSON: val_metrics*.json of the run stay untouched
+        path = out / f"val_metrics_keep_{Path(args.eval_keep_ranges).stem}.json"
+        save_json({"keep_ranges": args.eval_keep_ranges, "keep_ranges_sha256": keep_hash,
+                   "n_val_pairs": int(len(val["pair_index"])),
+                   "n_val_pairs_untrimmed": int(val["n_pairs_untrimmed"]),
+                   "metrics": val_metrics, "chunk_baselines": chunk_base}, path)
+        print(comparison_table(f"{args.run_name} (keep ranges)", val_metrics, root,
+                               quat_ref is not None, chunk_base, keep_hash))
+        print(f"\nsaved {path}")
+        return
+    save_json(val_metrics, out / "val_metrics_reeval.json")
     print(comparison_table(f"{args.run_name} (re-eval)", val_metrics, root, quat_ref is not None,
-                           chunk_base))
+                           chunk_base, keep_hash))
 
     saved = out / "val_metrics.json"
     if saved.exists():

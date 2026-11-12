@@ -6,6 +6,8 @@ compared directly with a trained model. Needs no TensorFlow and no GPU.
 
   python -m scripts.baselines                    # full validation split
   python -m scripts.baselines --max-episodes 2   # quick check (not added to results.csv)
+  python -m scripts.baselines --canonical-quaternion --keep-ranges configs/keep_ranges/star_il_tool_visible.csv
+                                                 # same pairs and statistics as a trimmed run
 """
 import argparse
 import json
@@ -27,15 +29,19 @@ def parse_args():
                    help="use only the first N validation episodes (smoke test)")
     p.add_argument("--canonical-quaternion", action="store_true",
                    help="same quaternion signs as train.py --canonical-quaternion")
-    p.add_argument("--out", help="default: outputs/baselines, outputs/baselines_canonical with "
-                                 "--canonical-quaternion (outputs/baselines_smoke with --max-episodes)")
+    p.add_argument("--keep-ranges", default=None,
+                   help="same keep ranges as train.py --keep-ranges (pairs and statistics)")
+    p.add_argument("--out", help="default: outputs/baselines[_canonical][_trimmed] "
+                                 "(outputs/baselines_smoke with --max-episodes)")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
     smoke = args.max_episodes is not None
-    default = "outputs/baselines_canonical" if args.canonical_quaternion else "outputs/baselines"
+    # the same folder name train.py's baselines_json() looks for
+    default = ("outputs/baselines" + ("_canonical" if args.canonical_quaternion else "")
+               + ("_trimmed" if args.keep_ranges else ""))
     out = Path(args.out or ("outputs/baselines_smoke" if smoke else default))
     out.mkdir(parents=True, exist_ok=True)
 
@@ -45,14 +51,19 @@ def main():
     state_names, action_names = data.feature_names(root)
     train_eps, _ = data.drop_missing_videos("train", data.get_split_episodes("train", root),
                                             root=root, verbose=False)
+    keep_ranges = data.load_keep_ranges(args.keep_ranges) if args.keep_ranges else None
+    keep_hash = data.file_sha256(args.keep_ranges) if args.keep_ranges else None
+    if keep_ranges is not None:
+        data.check_keep_ranges(keep_ranges, root)          # exactly train + val of this dataset
     quat_ref = None
     if args.canonical_quaternion:   # the same reference as a training run would compute
-        quat_ref = data.compute_quat_reference(train_eps, root)
+        quat_ref = data.compute_quat_reference(train_eps, root, keep_ranges)
         data.save_quat_reference(quat_ref, out / "quat_reference.json")
-    stats = data.compute_norm_stats(train_eps, root, quat_ref)
+    stats = data.compute_norm_stats(train_eps, root, quat_ref, keep_ranges)
     data.save_norm_stats(stats, out / "norm_stats.json")
     episodes = data.get_split_episodes("val", root)[:args.max_episodes] if smoke else None
-    val = data.load_split("val", root=root, stats=stats, episodes=episodes, quat_ref=quat_ref)
+    val = data.load_split("val", root=root, stats=stats, episodes=episodes, quat_ref=quat_ref,
+                          keep_ranges=keep_ranges)
     t = val["pair_index"]
     state_t, state_t1, action_t = val["states"][t], val["states"][t + 1], val["actions"][t]
 
@@ -92,6 +103,8 @@ def main():
     summary = {"split": "val",
                "dataset_root": root.as_posix(),
                "canonical_quaternion": args.canonical_quaternion,
+               "keep_ranges": args.keep_ranges,
+               "keep_ranges_sha256": keep_hash,   # train.py compares only on the same hash
                "skipped_episodes": val["skipped_episodes"],
                "episodes": np.unique(val["episode_index"]).tolist(),
                "n_pairs": int(len(t)),
@@ -106,7 +119,9 @@ def main():
         for name, m in results.items():
             metrics.append_results({"run_name": f"baseline:{name}", "dataset": root.name,
                                     "encoder": "baseline",
-                                    "canonical_quaternion": args.canonical_quaternion, **m})
+                                    "canonical_quaternion": args.canonical_quaternion,
+                                    "keep_ranges": Path(args.keep_ranges).name if args.keep_ranges else None,
+                                    **m})
         print(f"added {len(results)} rows to {metrics.RESULTS_CSV}")
 
 
