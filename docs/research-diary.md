@@ -683,11 +683,11 @@ Script: `scripts/look_tool_projection.py` (inspection only, no change to the mod
 
 ### Today in five lines
 
-- Trimmed E8 (step 0 of yesterday's list) finished, 3 seeds: E8 trained and evaluated on the tool-visible frames only.
-- Result: **exactly stand-still**. Position 1.001 ± 0.001, rotation 1.006 ± 0.002 (model ÷ stand-still, same 17,692 val pairs).
-- That is closer to 1 than E8 on the same pairs (1.016 ± 0.010), and the seed spread is 10× smaller. All three seeds collapsed to "offsets ≈ 0".
-- All 6 chunk runs (E8, trimmed E8) keep their epoch-1 weights (E8 seed 2: epoch 2). After that, train loss falls ~63% while val rises ~45%: the actor memorises.
-- Trimming stays (cleaner data, less variance), but it does not fix the actor. Next: give the actor the recent motion.
+- Trimmed E8 (tool-visible frames only, 3 seeds) is **exactly stand-still** (1.001 / 1.006), with a 10× smaller seed spread than E8: every seed = "offset ≈ 0". Trimming stays, but it doesn't fix the actor.
+- All chunk runs keep their epoch-1 weights; after that train falls and val rises (memorisation).
+- Step 1a (WM state = s(t) + zero-initialised Δ): the state head is now **at copy_state (1.03×)** instead of 23× worse, but never below it on val, while train goes below (memorisation).
+- 1a made the actor **15% worse** than stand-still (1.152 / 1.141), like E9. Interpretation: the old head's large initial error only delayed the actor's memorisation; "WM = mild regulariser" was that delay.
+- Every head is at or below its trivial baseline (actor vs stand-still, state vs copy, image 4–6× worse than copy_frame), while train loss falls in all of them: the bottleneck is input information, not capacity.
 
 ### Trimmed E8: setup
 
@@ -723,12 +723,12 @@ Same as E8 (simple_cnn, latent 512, canonical quaternions, chunk 16, WM on, 3 se
 - The seed spread drops 10× (±0.003 vs ±0.028 mm). Three independent trainings within 0.1% of stand-still = the same trivial predictor.
 
 **b) Why E8 was 0.998 on untrimmed val but 1.016 on trimmed val (hypothesis, not checked yet).**
-- The trimmed tail is the tool being withdrawn: a consistent upward z motion.
-- E8 probably learned a small mean drift towards it: it helps on tail pairs (untrimmed val), and hurts on visible-tool pairs (trimmed val).
-- Trimming removes that drift from training, so trimmed E8 sits exactly on zero.
-- Check: mean predicted z offset at step 16 on trimmed val. Expected E8 > 0, trimmed E8 ≈ 0.
+- The removed pairs (1,654 on val) are not only the withdrawal tail but also the approach at the start: the tool is off-screen while the robot moves fast (val frames removed: 0.6% at the start, 7.6% at the end).
+- They are fast pairs: stand-still ≈ 5.36 mm on them (vs 2.76 mm on the kept pairs), and E8 ≈ 4.84 mm = **0.90× stand-still** there. E8's small edge on untrimmed val comes entirely from these pairs.
+- Two explanations: (1) a **constant drift** learned from these phases, which helps on them and hurts on visible pairs; (2) a **"no tool in image" cue**: E8 predicts motion only when the tool is not visible.
+- Check: mean predicted offset (per axis, step 16) of E8 **separately on visible and removed pairs**. ≠ 0 on both = constant drift; ≠ 0 only on removed = image cue. Trimmed E8 should be ≈ 0 on both.
 
-**c) The checkpoint is the untrained model.**
+**c) The checkpoint is the barely trained model.** After epoch 1 it has seen every pair once and learned only the mean offset ≈ 0 (≈ the median, under Huber).
 
 | | best epoch | val action loss: best → last | train action loss: first → last |
 |---|---|---|---|
@@ -736,7 +736,7 @@ Same as E8 (simple_cnn, latent 512, canonical quaternions, chunk 16, WM on, 3 se
 | Trimmed E8, seeds 0 / 1 / 2 | 1 / 1 / 1 | 0.780 → 1.15 (+47%) | 0.76 → 0.28 |
 
 - Every epoch that learns something makes val worse. Early stopping on `val_action_output_loss` therefore keeps the epoch-1 weights, which are ≈ the Huber-optimal constant (offset ≈ 0) = stand-still.
-- So "E8 ≈ stand-still" means "the selected model hasn't learned anything", not "the model learned to stand still".
+- So "E8 ≈ stand-still" means "the selected model has learned nothing beyond the mean offset", not "the model learned to stand still".
 - Trimming doesn't change this pattern (same shape, same relative size). It matches D2 and the chunk probe: without history, (frame, state) doesn't identify the future motion.
 
 **d) World model (auxiliary).**
@@ -750,15 +750,54 @@ Same as E8 (simple_cnn, latent 512, canonical quaternions, chunk 16, WM on, 3 se
 - Images: same on the same pairs. State: only roughly comparable (trimming moved the state std by up to 5%).
 - Both WMs are evaluated at epoch 1, because the checkpoint is chosen on the action loss. Their val image loss keeps improving to ~0.0023 by epoch 10. The val state loss gets worse (0.003 → 0.017–0.027): the state head overfits too.
 
+### Step 1a: Δstate with a skip connection
+
+**What:** next_state = s(t) + Dense(...), with the last Dense zero-initialised, so the untrained model is exactly copy_state (checked before training: max difference 0.0). The loss stays MSE on s(t+1), as in E1 / trimmed E8. Same parameter count (71,975,675). Flag `--state-skip`, commit `2bde5ef`. New reference line in every run: `val_next_state_output_loss_copy` (history.csv) and `next_state_mse_copy` (val_metrics*.json).
+
+**My five lines:**
+
+| | |
+|---|---|
+| Question | Can the WM state head beat copy_state on val, with a stable curve? |
+| Hypothesis | Predicting the small change Δ is easier than the full state. |
+| Prediction | 1a gives a smooth curve, close to copy_state but not clearly better. |
+| Surprise | Still worse than copy_state → the inputs lack motion info. |
+| Change | WM branch only; actor and trimmed data as in C (trimmed E8). |
+
+**Results** (3 seeds, trimmed val, 17,692 pairs; same keep ranges, so identical statistics and comparable normalised losses):
+
+| | Trimmed E8 (absolute head) | **1a (skip)** | Trivial baseline |
+|---|---|---|---|
+| `next_state_mse` | 0.0036 ± 0.0015 (23× copy) | **0.000160 ± 0.000002 (1.03× copy)** | copy_state 0.000156 |
+| actor position ÷ stand-still | 1.001 ± 0.001 | **1.152 ± 0.008** | 1 |
+| actor rotation ÷ stand-still | 1.006 ± 0.002 | **1.141 ± 0.028** | 1 |
+| actor Huber | 0.780 ± 0.001 | 0.878 ± 0.019 | stand-still 0.779 |
+| `next_image_mse` (checkpoint) | 0.00314 ± 0.00003 | 0.00351 ± 0.00019 | copy_frame ≈ 0.0006¹ |
+| best epoch | 1 / 1 / 1 | 1 / 1 / 1 | |
+
+¹ From `baselines_canonical_trimmed` (18,457 one-step trimmed pairs; almost the same set as the chunk pairs, not identical).
+
+**What it means:**
+
+1. **The state head stays at copy in every epoch (1.02–1.10×), never below.** Train goes below its own copy level (0.000157): 0.000156 → 0.000130 (−17%) = memorisation. The val rise is small (+2–10% over copy) because the head only outputs the small Δ; it is about half the train drop or less.
+2. **~94% of the copy error is `endo360_joint_pos`** (the needle driver). The kuka joints barely move per frame.
+3. **The actor got 15% worse** (1.152 / 1.141). With 1a its train loss falls already in epoch 1 (0.72 vs 0.76) and val rises at once (0.86–0.90 vs 0.78), like E9 (WM off). *Interpretation:* the old absolute head's large initial error dominated the gradients reaching the shared encoder in epoch 1, so the actor memorised more slowly. 1a removes that, like E9. So the old "WM = mild regulariser" was a **delay of memorisation**, not useful structure.
+4. **Every head is at or below its trivial baseline:** actor vs stand-still, state vs copy_state, image 4–6× worse than copy_frame (≈ 0.0006). Train loss falls in every head, so capacity isn't the limit: **the bottleneck is input information.**
+
+**Note:** 1a and E7 differ in loss (MSE vs scaled Huber), initialisation, actor (chunk) and data (trim), so 1a doesn't prove that the loss scale alone caused E7's failure.
+
+**Verdict:** 1a met its success criterion (stable curve, no rise), and my prediction was right.
+
 ### Decision
 
-- **Keep trimming as the default for STAR-IL** (cleaner data, a lower seed spread, no bias from the withdrawal tail).
-- Trimming is not the bottleneck. The next experiment gives the actor the recent motion. Its reference is **constant velocity** (2.452 mm on trimmed val), not stand-still.
+- **Keep trimming as the default for STAR-IL** (cleaner data, a lower seed spread, no bias from the removed fast phases).
+- **Keep the 1a state head** (starts at copy_state, honest reference line, no initial gradient shock).
+- I follow Michael's roadmap order: step 1 = the world model (1a done), history = step 4.
 
 ### Next steps
 
 - [x] Trimmed E8, 3 seeds: 1.001 / 1.006, below the 1.016 / 1.008 target, but only because it reached stand-still.
 - [x] Commit the projection script, the keep-ranges file and the trimming code (`29c0fb8`).
-- [ ] Check hypothesis b: dump the predicted offsets of E8 and trimmed E8 on trimmed val.
-- [ ] Actor with recent motion (a(t−1) − a(t−2), or a short history), trimmed, compared with constant velocity.
+- [x] Step 1a: Δstate with a skip connection, 3 seeds (`2bde5ef`).
+- [ ] Check hypothesis b: mean predicted offset of E8 (and trimmed E8) separately on visible and removed val pairs.
 - [ ] Send the open questions to Michael.
