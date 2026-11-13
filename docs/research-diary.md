@@ -676,3 +676,89 @@ Script: `scripts/look_tool_projection.py` (inspection only, no change to the mod
 - [ ] If they also stay at ≈ 1.0: give the actor the recent motion (a(t−1) − a(t−2), or a short history), and compare with constant velocity.
 - [ ] Commit the projection script, the keep-ranges file and the trimming code.
 - [ ] Send the open questions to Michael.
+
+---
+
+## 2026-11-13
+
+### Today in five lines
+
+- Trimmed E8 (step 0 of yesterday's list) finished, 3 seeds: E8 trained and evaluated on the tool-visible frames only.
+- Result: **exactly stand-still**. Position 1.001 ± 0.001, rotation 1.006 ± 0.002 (model ÷ stand-still, same 17,692 val pairs).
+- That is closer to 1 than E8 on the same pairs (1.016 ± 0.010), and the seed spread is 10× smaller. All three seeds collapsed to "offsets ≈ 0".
+- All 6 chunk runs (E8, trimmed E8) keep their epoch-1 weights (E8 seed 2: epoch 2). After that, train loss falls ~63% while val rises ~45%: the actor memorises.
+- Trimming stays (cleaner data, less variance), but it does not fix the actor. Next: give the actor the recent motion.
+
+### Trimmed E8: setup
+
+Same as E8 (simple_cnn, latent 512, canonical quaternions, chunk 16, WM on, 3 seeds) + `--keep-ranges configs/keep_ranges/star_il_tool_visible.csv`. Every train statistic (norm stats, quaternion reference, chunk scale) comes from the kept rows only.
+
+**Which numbers compare:**
+
+| Comparison | Same val pairs? | Same normalisation? | Valid metrics |
+|---|---|---|---|
+| Trimmed E8 vs E8 on trimmed val (`val_metrics_keep_star_il_tool_visible.json`) | yes, 17,692 | no (z std 29.6 → 20.6 mm) | mm, degrees, ratio to stand-still, `next_image_mse` |
+| Trimmed E8 vs E8 on untrimmed val | no (17,692 vs 19,346) | no | only ratios to the baselines on each run's own pairs |
+
+`action_mse` (8.35 vs 6.20) and `action_huber` (0.780 vs 0.639) differ only because of the normalisation: not used.
+
+### Result: mean of the 16 steps (3 seeds, mean ± std)
+
+| | pairs | position mm | ÷ stand-still | ÷ const. vel. | rotation ° | ÷ stand-still | ÷ const. vel. |
+|---|---|---|---|---|---|---|---|
+| E8, untrimmed val | 19,346 | 2.981 ± 0.034 | 0.998 ± 0.011 | 1.158 | 0.578 ± 0.003 | 1.005 ± 0.005 | 0.753 |
+| E8, trimmed val | 17,692 | 2.807 ± 0.028 | 1.016 ± 0.010 | 1.145 | 0.561 ± 0.003 | 1.008 ± 0.006 | 0.737 |
+| **Trimmed E8** | 17,692 | **2.768 ± 0.003** | **1.001 ± 0.001** | 1.129 | **0.560 ± 0.001** | **1.006 ± 0.002** | 0.735 |
+| stand-still (trimmed val) | 17,692 | 2.764 | 1 | – | 0.557 | 1 | – |
+| const. velocity (trimmed val) | 17,692 | 2.452 | – | 1 | 0.761 | – | 1 |
+
+**Per step (trimmed E8 ÷ stand-still):** position 1.001 at every step 1–16; rotation 1.004 (step 1) → 1.006 (step 16). Flat across the horizon = the "no change" predictor.
+
+**Per step (trimmed E8 ÷ const. velocity), position:** 2.06 (step 1), 1.59 (step 4), 1.22 (step 8), 1.06 (step 12), 0.97 (step 16). Constant velocity wins up to ~step 14. In rotation the model "wins" at every step (0.91 → 0.68), but only because constant velocity is bad at rotation (noisy angular velocity).
+
+### What it means
+
+**a) The gain over E8 is a move towards zero offsets, not learned motion.**
+- Same pairs: 2.768 vs 2.807 mm (−1.4%). With 3 seeds, Welch t ≈ 2.4, df ≈ 2: **not significant**.
+- The seed spread drops 10× (±0.003 vs ±0.028 mm). Three independent trainings within 0.1% of stand-still = the same trivial predictor.
+
+**b) Why E8 was 0.998 on untrimmed val but 1.016 on trimmed val (hypothesis, not checked yet).**
+- The trimmed tail is the tool being withdrawn: a consistent upward z motion.
+- E8 probably learned a small mean drift towards it: it helps on tail pairs (untrimmed val), and hurts on visible-tool pairs (trimmed val).
+- Trimming removes that drift from training, so trimmed E8 sits exactly on zero.
+- Check: mean predicted z offset at step 16 on trimmed val. Expected E8 > 0, trimmed E8 ≈ 0.
+
+**c) The checkpoint is the untrained model.**
+
+| | best epoch | val action loss: best → last | train action loss: first → last |
+|---|---|---|---|
+| E8, seeds 0 / 1 / 2 | 1 / 1 / 2 | 0.667 → 0.95 (+43%) | 0.66 → 0.25 |
+| Trimmed E8, seeds 0 / 1 / 2 | 1 / 1 / 1 | 0.780 → 1.15 (+47%) | 0.76 → 0.28 |
+
+- Every epoch that learns something makes val worse. Early stopping on `val_action_output_loss` therefore keeps the epoch-1 weights, which are ≈ the Huber-optimal constant (offset ≈ 0) = stand-still.
+- So "E8 ≈ stand-still" means "the selected model hasn't learned anything", not "the model learned to stand still".
+- Trimming doesn't change this pattern (same shape, same relative size). It matches D2 and the chunk probe: without history, (frame, state) doesn't identify the future motion.
+
+**d) World model (auxiliary).**
+
+| | next_image_mse (val) | next_state_mse (normalised) |
+|---|---|---|
+| E8, untrimmed val | 0.00302 ± 0.00021 | 0.0040 ± 0.0012 |
+| E8, trimmed val | 0.00306 ± 0.00021 | 0.0041 ± 0.0013 |
+| Trimmed E8 | 0.00314 ± 0.00003 | 0.0036 ± 0.0015 |
+
+- Images: same on the same pairs. State: only roughly comparable (trimming moved the state std by up to 5%).
+- Both WMs are evaluated at epoch 1, because the checkpoint is chosen on the action loss. Their val image loss keeps improving to ~0.0023 by epoch 10. The val state loss gets worse (0.003 → 0.017–0.027): the state head overfits too.
+
+### Decision
+
+- **Keep trimming as the default for STAR-IL** (cleaner data, a lower seed spread, no bias from the withdrawal tail).
+- Trimming is not the bottleneck. The next experiment gives the actor the recent motion. Its reference is **constant velocity** (2.452 mm on trimmed val), not stand-still.
+
+### Next steps
+
+- [x] Trimmed E8, 3 seeds: 1.001 / 1.006, below the 1.016 / 1.008 target, but only because it reached stand-still.
+- [x] Commit the projection script, the keep-ranges file and the trimming code (`29c0fb8`).
+- [ ] Check hypothesis b: dump the predicted offsets of E8 and trimmed E8 on trimmed val.
+- [ ] Actor with recent motion (a(t−1) − a(t−2), or a short history), trimmed, compared with constant velocity.
+- [ ] Send the open questions to Michael.
