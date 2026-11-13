@@ -13,10 +13,14 @@ LATENT_DIM = 512   # NEW: size of the bottleneck
 def build_actor_world_model(state_dim, action_dim, img_h=IMG_H, img_w=IMG_W, lang_dim=LANG_DIM,
                             latent_dim=LATENT_DIM, encoder="simple_cnn",
                             freeze_encoder=False, unfreeze_last_n=0, delta_factor=None,
-                            action_chunk=None):
+                            action_chunk=None, state_skip=False):
     # NEW (E7): delta_factor = data.state_delta_factor(stats) -> the state head predicts the
     #   change f (in Δ/scale units) and next_state = state + delta_factor * f; None = original
     # NEW (E8): action_chunk = k -> the actor predicts k offsets from a(t-1), shape (k, action_dim)
+    # NEW (1a): state_skip=True -> next_state = state + Dense(s_x), the Dense zero-initialised, so
+    #   the untrained model is exactly copy_state; same loss (MSE) and targets as the original
+    if state_skip and delta_factor is not None:
+        raise ValueError("state_skip and delta_factor are two different state heads: choose one")
     # --- A: inputs ---
     image_input = keras.Input(shape=(img_h, img_w, 3), name="image_input")
     state_input = keras.Input(shape=(state_dim,), name="state_input")
@@ -43,7 +47,12 @@ def build_actor_world_model(state_dim, action_dim, img_h=IMG_H, img_w=IMG_W, lan
         [encoded_img, state_input, language_input, action_input])
 
     s_x = layers.Dense(128, activation="relu")(wm_features)
-    if delta_factor is None:
+    if state_skip:
+        # NEW (1a): skip connection in normalised units; only this output layer starts at zero
+        #   (bias is zero by default), so at initialisation next_state = state_input exactly
+        delta = layers.Dense(state_dim, kernel_initializer="zeros", name="state_change")(s_x)
+        next_state_output = layers.Add(name="next_state_output")([state_input, delta])
+    elif delta_factor is None:
         next_state_output = layers.Dense(state_dim, name="next_state_output")(s_x)
     else:
         # NEW (E7): skip connection; delta_factor is a fixed constant, not trained

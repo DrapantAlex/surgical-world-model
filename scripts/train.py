@@ -13,6 +13,7 @@ The test split is never loaded.
   python -m scripts.train --dataset-root data/open_h/Surgical/jhu/imerse/star_il/star_il
   python -m scripts.train ... --w-next-state 0 --w-next-image 0   # world model off (actor only)
   python -m scripts.train ... --state-delta   # E7: WM state head predicts the change (skip)
+  python -m scripts.train ... --state-skip    # 1a: state + zero-initialised Dense, MSE (starts = copy)
   python -m scripts.train ... --chunk 16      # E8: actor predicts 16 offsets from a(t-1)
   python -m scripts.train ... --keep-ranges configs/keep_ranges/star_il_tool_visible.csv
                                               # only the kept frames (pairs + statistics)
@@ -77,6 +78,9 @@ def parse_args():
     p.add_argument("--state-delta", action="store_true",
                    help="E7: state head predicts the change f, next_state = state + f (skip); "
                         "loss = Huber on Δ / scale (scale saved in norm_stats.json)")
+    p.add_argument("--state-skip", action="store_true",
+                   help="1a: next_state = state + Dense(...) zero-initialised (starts as "
+                        "copy_state); loss stays MSE on the normalised next state")
     p.add_argument("--chunk", type=int, default=None,
                    help="E8: actor predicts this many offsets a(t+i) - a(t-1), option-C scale "
                         "per step and group (saved in norm_stats.json); default: a(t) only")
@@ -98,6 +102,8 @@ def parse_args():
         p.error("--eval-only needs --run-name")
     if args.w_next_state < 0 or args.w_next_image < 0:
         p.error("loss weights must be >= 0")
+    if args.state_skip and args.state_delta:
+        p.error("--state-skip and --state-delta are two different state heads: choose one")
     # keep-ranges files are checked here, before the run folder exists
     if args.eval_keep_ranges and not args.eval_only:
         p.error("--eval-keep-ranges needs --eval-only (use --keep-ranges for training)")
@@ -174,13 +180,22 @@ def build_model(cfg, stats):
                                     latent_dim=cfg["latent_dim"], encoder=cfg["encoder"],
                                     freeze_encoder=cfg["freeze_encoder"],
                                     unfreeze_last_n=cfg["unfreeze_last_n"],
-                                    delta_factor=factor, action_chunk=cfg.get("chunk"))
+                                    delta_factor=factor, action_chunk=cfg.get("chunk"),
+                                    state_skip=cfg.get("state_skip", False))   # 1a; older runs: off
     model.compile(optimizer=keras.optimizers.Adam(learning_rate=cfg["lr"]),
                   loss={"action_output": keras.losses.Huber(),
                         "next_state_output": "mse" if factor is None else scaled_huber(factor),
                         "next_image_output": "mse"},
                   loss_weights=loss_weights(cfg))
     return model
+
+def copy_state_mse(split):
+    """Val MSE of "next state = current state" (copy_state), normalised units: the mean of
+    (s(t+1) - s(t))² over every pair t and every state dim. Same definition as Keras "mse" on
+    next_state_output (mean over dims, then over samples; equal counts per sample)."""
+    t = split["pair_index"]
+    diff = split["states"][t + 1].astype(np.float64) - split["states"][t].astype(np.float64)
+    return float(np.mean(diff ** 2))
 
 def evaluate(model, val, stats, batch_size, root, factor=None):
     """Predict every val pair (fixed order) and measure it with models/metrics.py."""
@@ -202,6 +217,7 @@ def evaluate(model, val, stats, batch_size, root, factor=None):
                                    physical, action_names)
     m.update(metrics.next_state_metrics(np.concatenate(pred_state), val["states"][t + 1], stats,
                                         physical, state_names))
+    m["next_state_mse_copy"] = copy_state_mse(val)   # 1a: reference for next_state_mse, same pairs
     if factor is not None:   # E7: the loss on the change, model vs f = 0
         m.update(metrics.state_delta_metrics(np.concatenate(pred_state), val["states"][t],
                                              val["states"][t + 1], factor))
@@ -356,12 +372,21 @@ def train(args):
     cfg["run_name"] = run_name
     model = build_model(cfg, stats)
     factor = delta_factor(cfg, stats)
-    # E7: val loss of predicting f = 0 (the "no change" reference for the state branch)
-    zero_logs = {} if factor is None else {
-        "val_next_state_output_loss_zero": metrics.state_delta_metrics(
+    # reference lines for the state branch, flat in every epoch's logs and saved in config.json:
+    # copy_state (every run; 1a: the untrained --state-skip model) and, for E7, f = 0
+    reference_logs = {"val_next_state_output_loss_copy": copy_state_mse(val)}
+    if factor is not None:
+        reference_logs["val_next_state_output_loss_zero"] = metrics.state_delta_metrics(
             val["states"][val["pair_index"]], val["states"][val["pair_index"]],
-            val["states"][val["pair_index"] + 1], factor)["next_state_delta_huber_zero"]}
-    cfg.update(**zero_logs)
+            val["states"][val["pair_index"] + 1], factor)["next_state_delta_huber_zero"]
+    cfg.update(**reference_logs)
+    if args.state_skip:   # 1a: before any training, the state head must be exactly copy_state
+        inputs, _ = next(iter(val_ds))
+        pred_state = model(inputs, training=False)[1].numpy()
+        gap = float(np.max(np.abs(pred_state - inputs["state_input"].numpy())))
+        print(f"state skip check: max |next_state - state_input| = {gap} (must be 0)")
+        if gap != 0.0:
+            raise AssertionError(f"untrained --state-skip model is not copy_state (gap {gap})")
     cfg.update(
         freeze=freeze_label(cfg), monitor=MONITOR, loss_weights=loss_weights(cfg),
         params_total=int(model.count_params()),
@@ -386,7 +411,7 @@ def train(args):
     callbacks = [
         EpochTimer(),
         CheckMonitor(),
-        ConstantLogs(zero_logs),
+        ConstantLogs(reference_logs),
         keras.callbacks.ModelCheckpoint(str(out / "best.weights.h5"), monitor=MONITOR, mode="min",
                                         save_best_only=True, save_weights_only=True, verbose=1),
         keras.callbacks.EarlyStopping(monitor=MONITOR, mode="min", patience=args.patience,
@@ -428,7 +453,8 @@ def train(args):
                                 "latent_dim": args.latent_dim,
                                 "w_next_state": args.w_next_state,
                                 "w_next_image": args.w_next_image,
-                                "state_delta": args.state_delta, "chunk": args.chunk,
+                                "state_delta": args.state_delta, "state_skip": args.state_skip,
+                                "chunk": args.chunk,
                                 "keep_ranges": Path(args.keep_ranges).name if args.keep_ranges else None,
                                 "epochs": cfg["epochs_run"],
                                 "best_epoch": cfg["best_epoch"],
@@ -460,6 +486,9 @@ def eval_only(args):
     model.load_weights(str(out / "best.weights.h5"))
     val_metrics = evaluate(model, val, stats, cfg["batch_size"], root, delta_factor(cfg, stats))
     chunk_base = chunk_baseline_metrics(val, stats, root) if cfg.get("chunk") else None
+    model_mse, copy_mse = val_metrics["next_state_mse"], val_metrics["next_state_mse_copy"]
+    copy_line = (f"next_state_mse: model {model_mse:.3g} vs copy_state {copy_mse:.3g} "
+                 f"(model / copy = {model_mse / copy_mse:.2f})")
     if args.eval_keep_ranges:   # its own JSON: val_metrics*.json of the run stay untouched
         path = out / f"val_metrics_keep_{Path(args.eval_keep_ranges).stem}.json"
         save_json({"keep_ranges": args.eval_keep_ranges, "keep_ranges_sha256": keep_hash,
@@ -468,11 +497,13 @@ def eval_only(args):
                    "metrics": val_metrics, "chunk_baselines": chunk_base}, path)
         print(comparison_table(f"{args.run_name} (keep ranges)", val_metrics, root,
                                quat_ref is not None, chunk_base, keep_hash))
-        print(f"\nsaved {path}")
+        print(f"\n{copy_line}")
+        print(f"saved {path}")
         return
     save_json(val_metrics, out / "val_metrics_reeval.json")
     print(comparison_table(f"{args.run_name} (re-eval)", val_metrics, root, quat_ref is not None,
                            chunk_base, keep_hash))
+    print(f"\n{copy_line}")
 
     saved = out / "val_metrics.json"
     if saved.exists():
