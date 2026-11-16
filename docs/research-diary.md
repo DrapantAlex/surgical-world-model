@@ -885,9 +885,10 @@ Best weights vs stand-still, per pair, on all 17,692 trimmed val pairs (51 episo
 | position error, mean of 16 steps | 2.766 mm vs 2.764 mm stand-still |
 | rotation error, mean of 16 steps | 0.557° vs 0.557° |
 
-The sign is consistent per episode, but the size is tiny: not significant once the differences are weighted by size, and gone in physical units. Two caveats make even this optimistic:
-- **Selection bias:** the best of 93 checks, chosen on the same val set it is measured on.
-- **Numerical noise of the same order:** the logged val loss of the best check is 0.77849, and re-evaluating the same weights gives 0.77867 (1a seed 0: 0.8792 vs 0.8794). That is ≈ 2e-4, while the gap to stand-still is ≈ 1e-3.
+The sign is consistent per episode, but the size is tiny: not significant once the differences are weighted by size, and gone in physical units. Two caveats:
+- **Selection bias:** the best of 93 checks, chosen on the same val set it is measured on. This makes the result optimistic.
+- **The logged val loss is batch-weighted, not exact:** the logged val loss of the best check is 0.77849, and re-evaluating the same weights per pair gives 0.77867 (1a seed 0: 0.8792 vs 0.8794). This ≈ 2e-4 gap is not noise. Keras logs the val loss as the unweighted mean of the batch means (our batch size is `None` in the tf.data graph), so the last, smaller batch (28 of 17,692 pairs) is over-weighted. The tests above use the exact per-pair values; the checkpoint was chosen on the logged one. Since step 1b every run also logs the exact value as `val_action_output_huber` (checked: 0.778667 = per-pair to 7e-8). The conclusions don't change.
+  *(Corrected 2026-11-16: first written as "numerical noise of the same order". Found when the new per-dimension state metrics did not average to the logged state loss.)*
 
 ### What the actor learned
 
