@@ -801,3 +801,122 @@ Same as E8 (simple_cnn, latent 512, canonical quaternions, chunk 16, WM on, 3 se
 - [x] Step 1a: Δstate with a skip connection, 3 seeds (`2bde5ef`).
 - [ ] Check hypothesis b: mean predicted offset of E8 (and trimmed E8) separately on visible and removed val pairs.
 - [ ] Send the open questions to Michael.
+
+---
+
+## 2026-11-16
+
+### Today in five lines
+
+- New tool: `--val-every N` (commit `58b7a93`) validates every N batches instead of once per epoch. Epoch 1 is proven bitwise identical to a normal run.
+- Run 1a-val500 (trim-skip, seed 0, `--val-every 500`): the best check is at **batch 500 (0.11 epochs), ≈ stand-still**.
+- At that point the actor equals an input-free rule, "always predict the mean training offset" (0.7787 vs 0.7785).
+- From batch ~1,000, train goes below stand-still and val goes above it at the same moment: memorisation.
+- Early stopping can't fix the actor: the bottleneck is the input information.
+
+### The tool: `--val-every N`
+
+**Why:** every run so far had "best = epoch 1", which is the earliest point measured. What happens inside epoch 1 was invisible.
+
+**How (in simple words):**
+- The training data becomes an endless reshuffled stream (`.repeat()` after `.batch()`, so each pass keeps its own smaller last batch). Keras treats N batches as one "epoch" (`steps_per_epoch=N`), so checkpointing, early stopping and logging run every N batches. Validation is always the full val split.
+- `--epochs`, `--patience` and `--vis-every` stay in real epochs and are converted to checks with ceil(x × batches per epoch / N). At N = 500 (4,582 batches per epoch): 100 epochs = 917 checks, patience 10 = 92 checks.
+- New in every run: `batches_seen` / `epochs_seen` columns (a real x-axis), the stand-still reference line `val_action_output_loss_standstill` (0.7795 on trimmed val, equal to `chunk_baselines.json` to 8e-9), and `best_batch` / `best_epoch_equiv` in `config.json`. `best_epoch` keeps its meaning (index of the best check), so old code still works.
+
+**The shuffle finding:**
+
+| | epoch 1 | epoch 2 | epoch 3 |
+|---|---|---|---|
+| normal Keras epochs (`shuffle_order: keras_epochs`) | shuffle #1 | #3 | #5 |
+| `--val-every` (`shuffle_order: repeat`) | #1 | #2 | #3 |
+
+- Normal Keras (3.15, `epoch_iterator.py`) creates an extra iterator between epochs, and creating an iterator already draws the next reshuffle. So every second shuffle is silently skipped.
+- Test (`scripts/check_val_every_weights.py`, deterministic smokes, `--val-every 11` vs none): **all 86 weight arrays are bitwise identical after epoch 1**, despite the extra mid-epoch validation. After epoch 2 they differ, because of the data order, not the validation. Later epochs therefore use a different, equally random order. This is recorded in `config.json` as `shuffle_order` (old runs: `keras_epochs`).
+- **Lesson:** `scripts/check_repeat_batches.py` passed, but it compared against plain tf.data passes, not against Keras. Only the test against the real training found the difference.
+
+**Cost:** at N = 500, 16 s training + 16 s validation per check (≈ 2× the run time).
+
+### Run 1a-val500
+
+Same as 1a seed 0 (simple_cnn, latent 512, canonical quaternions, chunk 16, trimmed, `--state-skip`, WM on) + `--val-every 500 --seed 0`. Same `norm_stats.json` as 1a seed 0.
+
+**My five lines:**
+
+| | | Outcome |
+|---|---|---|
+| Question | Inside epoch 1, is there a moment where the actor beats stand-still? | Formally at batch 500 (−0.1%), but not a real win (see below). |
+| Hypothesis | The general part is learned in the first few hundred batches, then memorisation starts. | **Confirmed, refined:** the general part is the **mean training offset**, not 0. Memorisation starts by batch ~1,000. |
+| Prediction | Best around batch 500–1,500, still ≈ stand-still. | **Confirmed** (best at 500). |
+| Surprise | Clearly below stand-still at some check. | **Not observed.** |
+| Change | Evaluation schedule only. | **Holds** (epoch 1 bitwise identical). |
+
+**The curve** (action loss, Huber in target units; val stand-still 0.7795, train stand-still 0.7629):
+
+| batch | epochs | train action loss² | val action loss | val − stand-still |
+|---|---|---|---|---|
+| 0¹ | 0 | – | 0.7799 | +0.0005 |
+| **500** | **0.11** | 0.7755 | **0.7785** | **−0.0010** |
+| 1,000 | 0.22 | 0.7559 | 0.7806 | +0.0011 |
+| 1,500 | 0.33 | 0.7444 | 0.7826 | +0.0031 |
+| 2,000 | 0.44 | 0.7372 | 0.7925 | +0.013 |
+| 3,000 | 0.65 | 0.7106 | 0.8210 | +0.042 |
+| 4,500 | 0.98 | 0.6599 | 0.8986 | +0.119 |
+| 9,500 | 2.07 | 0.4849 | 1.0164 | +0.237 |
+| 46,500 | 10.15 | 0.2646 | 1.1031 | +0.324 |
+
+¹ Not a logged check: an untrained model built with seed 0, evaluated afterwards on the same val pairs (its outputs are ≈ 0, |pred| 0.031).
+² Mean over the last 500 batches (Keras resets the training metrics at every check).
+
+**Run facts:** 93 checks (1 + 92 patience), stopped at 46,500 batches (10.15 epochs), 49.7 min.
+
+- **Val is lowest at the first check and rises almost monotonically.** There is no plateau. By the end of epoch 1 it is 12% above stand-still.
+- **This explains the old "best = epoch 1".** The 1a seeds had val 0.858–0.896 at epoch 1. This run has 0.8986 at batch 4,500, inside that band (not bitwise comparable: the normal runs were not `--deterministic`). The real minimum was more than 4,000 batches earlier.
+
+### Is the batch-500 advantage real?
+
+Best weights vs stand-still, per pair, on all 17,692 trimmed val pairs (51 episodes):
+
+| Test | Result |
+|---|---|
+| mean difference (model − stand-still) | −0.0008 (−0.1%) |
+| pairs where the model is better | 48.1% |
+| episodes where the model is better | 34 / 51 (sign test p = 0.024) |
+| 95% bootstrap CI over episodes | [−0.0025, +0.0009]: **includes 0** |
+| position error, mean of 16 steps | 2.766 mm vs 2.764 mm stand-still |
+| rotation error, mean of 16 steps | 0.557° vs 0.557° |
+
+The sign is consistent per episode, but the size is tiny: not significant once the differences are weighted by size, and gone in physical units. Two caveats make even this optimistic:
+- **Selection bias:** the best of 93 checks, chosen on the same val set it is measured on.
+- **Numerical noise of the same order:** the logged val loss of the best check is 0.77849, and re-evaluating the same weights gives 0.77867 (1a seed 0: 0.8792 vs 0.8794). That is ≈ 2e-4, while the gap to stand-still is ≈ 1e-3.
+
+### What the actor learned
+
+- **At batch 500 it ignores its inputs.** The prediction spread across pairs is 0.059 (target 2.25), and the correlation with the target is 0.026. The input-free rule "always predict the mean training offset" scores the same (0.7785 vs 0.7787 for the model).
+- **From batch ~1,000 its predictions depend on the input.** Train loss goes below the best-constant level (≈ 0.76: stand-still 0.7629, mean offset 0.7628, median offset 0.7624 on train). A model that ignores its inputs can't do that. *This is a deduction, not measured directly.* The moment is approximate, because the train loss is averaged over the last 500 batches.
+- **At the same moment val gets worse**, so what it learns from the inputs doesn't generalise.
+- **Careful wording for conclusions:** "In this setup no generalising use of the inputs is visible." Not "the model never uses its inputs": a small generalising part could be hidden under larger memorisation.
+
+### World model
+
+- **State:** stays at copy level (≈ 0.00016, ratio ≈ 1.0), as in 1a.
+- **Image:** val falls from 0.0189 to 0.0023, but copy_frame on trimmed val is ≈ 0.0006³. So it is ≈ 4× worse than copying the frame: it learns to **redraw the scene**, not the dynamics.
+- The WM can't provide motion information that isn't in a single snapshot.
+
+³ From `baselines_canonical_trimmed` (0.000607, one-step trimmed pairs; almost the same set as the chunk pairs, not identical).
+
+### What it means
+
+- **The earlier trim-skip runs looked 10–15% worse than stand-still only because they were measured late** (epoch 1). Measured early, the actor ties stand-still.
+- **Early stopping can't fix this:** no point on the curve beats the mean-offset rule.
+- **The best-checkpoint row of this run in `results.csv` (action Huber 0.7787) is "≈ train-mean offset", not a learned policy.**
+- **For 1b and 1c the actor metric won't be informative.** Judge the WM state curve against copy_state, and the image against copy_frame.
+
+### Next steps
+
+- [x] `--val-every N`, commit `58b7a93`, epoch-1 proof.
+- [x] Run 1a-val500.
+- [ ] Decide: add a "train-mean offset" reference line (labels only) now or with 1b.
+- [ ] Step 1b: deeper state head (1–2 more Dense layers), with `--val-every 1000`.
+- [ ] Step 1c: depthwise convs, WM branch only.
+- [ ] Nice to have: save weights at a few checks and measure prediction spread and correlation on train and val (direct proof of when the inputs start to be used).
+- [ ] Skipped: `--val-every 50` diagnostic (batch 0 and 1,000 are both ≈ stand-still, so it can't change the conclusion).
