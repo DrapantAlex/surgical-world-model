@@ -21,6 +21,7 @@ The test split is never loaded.
 """
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -184,6 +185,27 @@ def scaled_huber(factor):
         return keras.losses.huber(y_true / k, y_pred / k)
     return loss
 
+def metric_name(feature):
+    """A feature name as a Keras metric name: Keras would silently drop "[", "]", "." itself,
+    so every run of other characters becomes one "_" here ("kuka_joint_pos[0]" ->
+    "kuka_joint_pos_0") and the metric and its _copy line share exactly this name."""
+    return re.sub(r"[^A-Za-z0-9_]+", "_", feature).strip("_")
+
+def state_dim_metrics(state_names):
+    """One val metric per state dimension: the MSE of that dimension only, logged as
+    (val_)next_state_output_mse_<name>. Keras averages metrics per SAMPLE, so the mean over
+    dimensions = the per-sample MSE of next_state_output (= next_state_mse in val_metrics.json),
+    not exactly the logged loss (an unweighted mean of batch means, see standstill_huber)."""
+    names = [metric_name(n) for n in state_names]
+    if len(set(names)) != len(names):
+        raise ValueError(f"state names are not unique as metric names: {names}")
+    def one(i, name):
+        def fn(y_true, y_pred):
+            return keras.ops.square(y_true[:, i] - y_pred[:, i])
+        fn.__name__ = f"mse_{name}"
+        return fn
+    return [one(i, n) for i, n in enumerate(names)]
+
 def build_model(cfg, stats):
     state_dim, action_dim = data.feature_dims(dataset_root(cfg))
     factor = delta_factor(cfg, stats)
@@ -197,7 +219,10 @@ def build_model(cfg, stats):
                   loss={"action_output": keras.losses.Huber(),
                         "next_state_output": "mse" if factor is None else scaled_huber(factor),
                         "next_image_output": "mse"},
-                  loss_weights=loss_weights(cfg))
+                  loss_weights=loss_weights(cfg),
+                  # metrics only (no gradient): the per-dimension state error
+                  metrics={"next_state_output":
+                           state_dim_metrics(data.feature_names(dataset_root(cfg))[0])})
     return model
 
 def copy_state_mse(split):
@@ -208,10 +233,26 @@ def copy_state_mse(split):
     diff = split["states"][t + 1].astype(np.float64) - split["states"][t].astype(np.float64)
     return float(np.mean(diff ** 2))
 
+def copy_state_mse_per_dim(split):
+    """copy_state_mse for each state dimension separately (mean over pairs only); the mean of
+    these values is copy_state_mse (equal counts per dimension)."""
+    t = split["pair_index"]
+    diff = split["states"][t + 1].astype(np.float64) - split["states"][t].astype(np.float64)
+    return np.mean(diff ** 2, axis=0)
+
+def trainmean_huber(train, val):
+    """E8: val action loss of the input-free rule "always predict the mean TRAIN chunk target"
+    (normalised units), with the compiled Huber() like standstill_huber. The bar a model must
+    beat to show that it uses its inputs (not only the average drift)."""
+    mean = data.chunk_targets(train, train["pair_index"]).astype(np.float64).mean(axis=0)
+    true = data.chunk_targets(val, val["pair_index"])
+    return float(keras.losses.Huber()(true, np.broadcast_to(mean, true.shape).astype(np.float32)))
+
 def standstill_huber(val):
-    """E8: val action loss of stand-still (every offset 0), computed like Keras computes
-    val_action_output_loss: the compiled Huber() on all val chunk targets at once (Keras
-    averages per-batch means weighted by batch size = the mean over every element)."""
+    """E8: val action loss of stand-still (every offset 0): the compiled Huber() on all val
+    chunk targets at once = the mean over every pair. Note: Keras logs val losses as the
+    UNWEIGHTED mean of the batch means (the batch size is None in our tf.data graph), so the
+    partial last batch is over-weighted; logged curves can differ from this line by ~1e-4."""
     true = data.chunk_targets(val, val["pair_index"])   # the get_pairs target, no frames
     return float(keras.losses.Huber()(true, np.zeros_like(true)))
 
@@ -431,8 +472,13 @@ def train(args):
     # reference lines for the state branch, flat in every epoch's logs and saved in config.json:
     # copy_state (every run; 1a: the untrained --state-skip model) and, for E7, f = 0
     reference_logs = {"val_next_state_output_loss_copy": copy_state_mse(val)}
-    if args.chunk:   # E8: the actor's reference line, stand-still (offsets 0) in the loss units
+    # copy_state per state dimension, next to the per-dimension val metrics (same names)
+    for name, value in zip(data.feature_names(root)[0], copy_state_mse_per_dim(val)):
+        reference_logs[f"val_next_state_output_mse_{metric_name(name)}_copy"] = float(value)
+    if args.chunk:   # E8: the actor's reference lines, in the loss units:
+        # stand-still (offsets 0) and the input-free mean train offset
         reference_logs["val_action_output_loss_standstill"] = standstill_huber(val)
+        reference_logs["val_action_output_loss_trainmean"] = trainmean_huber(train_split, val)
     if factor is not None:
         reference_logs["val_next_state_output_loss_zero"] = metrics.state_delta_metrics(
             val["states"][val["pair_index"]], val["states"][val["pair_index"]],
