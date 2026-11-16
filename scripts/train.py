@@ -44,7 +44,8 @@ from models.visualization import WorldModelTimelineCallback
 # the action weight is fixed; the two world-model weights are only the DEFAULTS of
 # --w-next-state / --w-next-image (and the values of runs saved before those options)
 LOSS_WEIGHTS = {"action_output": 1.0, "next_state_output": 1.0, "next_image_output": 0.1}
-MONITOR = "val_action_output_loss"     # best checkpoint and early stopping
+MONITOR = "val_action_output_loss"     # best checkpoint and early stopping (kept as in every
+                                       # earlier run; the exact per-pair value is val_action_output_huber)
 WANDB_PROJECT = "surgical-world-model"
 DELTA_FLOOR_C = 0.25   # --state-delta: scale = max(median|Δ|, DELTA_FLOOR_C * mean|Δ|) per dim
 CHUNK_FLOOR_C = 0.25   # --chunk: scale = max(median, CHUNK_FLOOR_C * mean) of each group's offset norm
@@ -227,8 +228,12 @@ def build_model(cfg, stats):
                         "next_state_output": "mse" if factor is None else scaled_huber(factor),
                         "next_image_output": "mse"},
                   loss_weights=loss_weights(cfg),
-                  # metrics only (no gradient): the per-dimension state error
-                  metrics={"next_state_output":
+                  # metrics only (no gradient): the exact per-pair actor Huber (Keras logs the
+                  # LOSS as an unweighted mean of batch means, see standstill_huber; metrics are
+                  # averaged per sample) and the per-dimension state error
+                  metrics={"action_output":
+                           [keras.metrics.MeanMetricWrapper(keras.losses.huber, name="huber")],
+                           "next_state_output":
                            state_dim_metrics(data.feature_names(dataset_root(cfg))[0])})
     return model
 
