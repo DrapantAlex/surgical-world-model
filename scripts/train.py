@@ -14,6 +14,7 @@ The test split is never loaded.
   python -m scripts.train ... --w-next-state 0 --w-next-image 0   # world model off (actor only)
   python -m scripts.train ... --state-delta   # E7: WM state head predicts the change (skip)
   python -m scripts.train ... --state-skip    # 1a: state + zero-initialised Dense, MSE (starts = copy)
+  python -m scripts.train ... --state-layers 3   # 1b: 3 hidden Dense(128) in the state head
   python -m scripts.train ... --chunk 16      # E8: actor predicts 16 offsets from a(t-1)
   python -m scripts.train ... --keep-ranges configs/keep_ranges/star_il_tool_visible.csv
                                               # only the kept frames (pairs + statistics)
@@ -83,6 +84,8 @@ def parse_args():
     p.add_argument("--state-skip", action="store_true",
                    help="1a: next_state = state + Dense(...) zero-initialised (starts as "
                         "copy_state); loss stays MSE on the normalised next state")
+    p.add_argument("--state-layers", type=int, default=1,
+                   help="1b: hidden Dense(128, relu) layers in the WM state head (1 = original)")
     p.add_argument("--chunk", type=int, default=None,
                    help="E8: actor predicts this many offsets a(t+i) - a(t-1), option-C scale "
                         "per step and group (saved in norm_stats.json); default: a(t) only")
@@ -109,6 +112,8 @@ def parse_args():
         p.error("loss weights must be >= 0")
     if args.val_every is not None and args.val_every <= 0:
         p.error("--val-every must be a positive number of batches")
+    if args.state_layers < 1:
+        p.error("--state-layers must be >= 1")
     if args.state_skip and args.state_delta:
         p.error("--state-skip and --state-delta are two different state heads: choose one")
     # keep-ranges files are checked here, before the run folder exists
@@ -214,7 +219,9 @@ def build_model(cfg, stats):
                                     freeze_encoder=cfg["freeze_encoder"],
                                     unfreeze_last_n=cfg["unfreeze_last_n"],
                                     delta_factor=factor, action_chunk=cfg.get("chunk"),
-                                    state_skip=cfg.get("state_skip", False))   # 1a; older runs: off
+                                    state_skip=cfg.get("state_skip", False),   # 1a; older runs: off
+                                    state_layers=cfg.get("state_layers", 1),   # 1b; older runs: 1
+                                    init_seed=cfg.get("seed", 0))   # 1b: seeds of the extra state layers
     model.compile(optimizer=keras.optimizers.Adam(learning_rate=cfg["lr"]),
                   loss={"action_output": keras.losses.Huber(),
                         "next_state_output": "mse" if factor is None else scaled_huber(factor),
@@ -570,6 +577,7 @@ def train(args):
                                 "w_next_state": args.w_next_state,
                                 "w_next_image": args.w_next_image,
                                 "state_delta": args.state_delta, "state_skip": args.state_skip,
+                                "state_layers": args.state_layers,
                                 "chunk": args.chunk,
                                 "keep_ranges": Path(args.keep_ranges).name if args.keep_ranges else None,
                                 "epochs": cfg["epochs_run"],

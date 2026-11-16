@@ -13,14 +13,18 @@ LATENT_DIM = 512   # NEW: size of the bottleneck
 def build_actor_world_model(state_dim, action_dim, img_h=IMG_H, img_w=IMG_W, lang_dim=LANG_DIM,
                             latent_dim=LATENT_DIM, encoder="simple_cnn",
                             freeze_encoder=False, unfreeze_last_n=0, delta_factor=None,
-                            action_chunk=None, state_skip=False):
+                            action_chunk=None, state_skip=False, state_layers=1, init_seed=0):
     # NEW (E7): delta_factor = data.state_delta_factor(stats) -> the state head predicts the
     #   change f (in Δ/scale units) and next_state = state + delta_factor * f; None = original
     # NEW (E8): action_chunk = k -> the actor predicts k offsets from a(t-1), shape (k, action_dim)
     # NEW (1a): state_skip=True -> next_state = state + Dense(s_x), the Dense zero-initialised, so
     #   the untrained model is exactly copy_state; same loss (MSE) and targets as the original
+    # NEW (1b): state_layers = K hidden Dense(128, relu) layers in the state head; 1 = original;
+    #   init_seed (the run's --seed) seeds the K-1 extra layers' initialisers
     if state_skip and delta_factor is not None:
         raise ValueError("state_skip and delta_factor are two different state heads: choose one")
+    if state_layers < 1:
+        raise ValueError(f"state_layers must be >= 1, got {state_layers}")
     # --- A: inputs ---
     image_input = keras.Input(shape=(img_h, img_w, 3), name="image_input")
     state_input = keras.Input(shape=(state_dim,), name="state_input")
@@ -47,6 +51,14 @@ def build_actor_world_model(state_dim, action_dim, img_h=IMG_H, img_w=IMG_W, lan
         [encoded_img, state_input, language_input, action_input])
 
     s_x = layers.Dense(128, activation="relu")(wm_features)
+    # NEW (1b): deeper state head. Keras draws initial weights in layer-creation order from one
+    #   global sequence, and these layers are created before the image decoder: with default
+    #   initialisers they would shift the decoder's initial weights. Their own seeded Glorot
+    #   (bias zeros, no randomness) keeps every other layer's init identical to K = 1.
+    for i in range(1, state_layers):
+        s_x = layers.Dense(128, activation="relu", name=f"state_hidden_{i}",
+                           kernel_initializer=keras.initializers.GlorotUniform(
+                               seed=init_seed + 1000 + i))(s_x)
     if state_skip:
         # NEW (1a): skip connection in normalised units; only this output layer starts at zero
         #   (bias is zero by default), so at initialisation next_state = state_input exactly
