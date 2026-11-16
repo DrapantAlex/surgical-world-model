@@ -17,6 +17,7 @@ The test split is never loaded.
   python -m scripts.train ... --chunk 16      # E8: actor predicts 16 offsets from a(t-1)
   python -m scripts.train ... --keep-ranges configs/keep_ranges/star_il_tool_visible.csv
                                               # only the kept frames (pairs + statistics)
+  python -m scripts.train ... --val-every 500 # one check (full val) every 500 train batches
 """
 import argparse
 import json
@@ -91,6 +92,9 @@ def parse_args():
                    help="with --eval-only: evaluate on the pairs of THIS keep-ranges file (the "
                         "run's own statistics), saved as val_metrics_keep_<file stem>.json")
     p.add_argument("--vis-every",type=int, default=5, help="timeline image every N epochs")
+    p.add_argument("--val-every", type=int, default=None,
+                   help="validate (full val split) every N training batches instead of once per "
+                        "epoch; --epochs, --patience, --vis-every stay in real epochs")
     p.add_argument("--wandb-mode", choices=["online", "offline", "disabled"], default="online")
     p.add_argument("--deterministic", action="store_true", help="deterministic TF ops (slower)")
     p.add_argument("--eval-only", action="store_true",
@@ -102,6 +106,8 @@ def parse_args():
         p.error("--eval-only needs --run-name")
     if args.w_next_state < 0 or args.w_next_image < 0:
         p.error("loss weights must be >= 0")
+    if args.val_every is not None and args.val_every <= 0:
+        p.error("--val-every must be a positive number of batches")
     if args.state_skip and args.state_delta:
         p.error("--state-skip and --state-delta are two different state heads: choose one")
     # keep-ranges files are checked here, before the run folder exists
@@ -150,6 +156,11 @@ def baselines_json(canonical, trimmed=False):
     name = "baselines" + ("_canonical" if canonical else "") + ("_trimmed" if trimmed else "")
     return OUTPUTS / name / "baselines.json"
 
+def shuffle_order(cfg):
+    """Which reshuffles the run trained on (see section D); runs saved before --val-every
+    were all normal Keras epochs."""
+    return cfg.get("shuffle_order", "keras_epochs")
+
 def episodes_for(split, max_episodes, root):
     """None = the whole split (read from the frame cache); else its first N episodes."""
     return None if max_episodes is None else data.get_split_episodes(split, root)[:max_episodes]
@@ -196,6 +207,17 @@ def copy_state_mse(split):
     t = split["pair_index"]
     diff = split["states"][t + 1].astype(np.float64) - split["states"][t].astype(np.float64)
     return float(np.mean(diff ** 2))
+
+def standstill_huber(val):
+    """E8: val action loss of stand-still (every offset 0), computed like Keras computes
+    val_action_output_loss: the compiled Huber() on all val chunk targets at once (Keras
+    averages per-batch means weighted by batch size = the mean over every element)."""
+    true = data.chunk_targets(val, val["pair_index"])   # the get_pairs target, no frames
+    return float(keras.losses.Huber()(true, np.zeros_like(true)))
+
+def checks(x_epochs, batches_per_epoch, val_every):
+    """--val-every: a count in real epochs -> the number of checks (N batches each) it spans."""
+    return int(np.ceil(x_epochs * batches_per_epoch / val_every))
 
 def evaluate(model, val, stats, batch_size, root, factor=None):
     """Predict every val pair (fixed order) and measure it with models/metrics.py."""
@@ -283,6 +305,19 @@ class EpochTimer(keras.callbacks.Callback):
         if logs is not None:
             logs["epoch_time_s"] = time.time() - self.t0
 
+class TrainingProgress(keras.callbacks.Callback):
+    """Adds the real x-axis to each check's logs: training batches seen so far and the
+    same in real epochs. One Keras "epoch" = one check = batches_per_check batches
+    (--val-every N: N; normal runs: one full epoch)."""
+    def __init__(self, batches_per_check, batches_per_epoch):
+        super().__init__()
+        self.batches_per_check, self.batches_per_epoch = batches_per_check, batches_per_epoch
+
+    def on_epoch_end(self, epoch, logs=None):
+        if logs is not None:
+            logs["batches_seen"] = (epoch + 1) * self.batches_per_check
+            logs["epochs_seen"] = logs["batches_seen"] / self.batches_per_epoch
+
 class CheckMonitor(keras.callbacks.Callback):
     """Stops at once if Keras does not log MONITOR (loss names differ between versions)."""
     def on_epoch_end(self, epoch, logs=None):
@@ -364,7 +399,28 @@ def train(args):
     val = data.load_split("val", root=root, stats=stats, quat_ref=quat_ref,
                           episodes=episodes_for("val", args.max_episodes, root), chunk=args.chunk,
                           keep_ranges=keep_ranges)
-    train_ds = make_dataset(train_split, args.batch_size, shuffle=True, seed=args.seed)
+    # evaluation schedule: one Keras "epoch" = one check. Normal runs: a check per real epoch.
+    # --val-every N: the passes repeated endlessly, cut into checks of N batches (shuffle
+    # order: see below); --epochs/--patience/--vis-every converted from real epochs
+    batches_per_epoch = int(np.ceil(len(train_split["pair_index"]) / args.batch_size))
+    if args.val_every:
+        batches_per_check = args.val_every
+        max_checks, patience_checks, vis_every_checks = (
+            checks(x, batches_per_epoch, args.val_every)
+            for x in (args.epochs, args.patience, args.vis_every))
+        print(f"--val-every {args.val_every}: {batches_per_epoch} batches per epoch -> "
+              f"{max_checks} checks max (= {args.epochs} epochs), patience {patience_checks} "
+              f"checks (= {args.patience} epochs), timeline every {vis_every_checks} checks")
+    else:
+        batches_per_check = batches_per_epoch
+        max_checks, patience_checks, vis_every_checks = args.epochs, args.patience, args.vis_every
+    # shuffle order: every new iterator draws the next reshuffle. Normal epochs: Keras 3.15
+    # creates two iterators between epochs and uses only the second (shuffles #1, #3, #5...,
+    # "keras_epochs"); .repeat() uses every one (#1, #2, #3..., "repeat"). So epoch 1 is
+    # identical to old runs (checked bitwise: scripts/check_val_every_weights.py), later
+    # epochs see a different but equally random order.
+    train_ds = make_dataset(train_split, args.batch_size, shuffle=True, seed=args.seed,
+                            repeat=bool(args.val_every))
     val_ds = make_dataset(val, args.batch_size, shuffle=False)
 
     # model + full configuration, saved before training starts
@@ -375,6 +431,8 @@ def train(args):
     # reference lines for the state branch, flat in every epoch's logs and saved in config.json:
     # copy_state (every run; 1a: the untrained --state-skip model) and, for E7, f = 0
     reference_logs = {"val_next_state_output_loss_copy": copy_state_mse(val)}
+    if args.chunk:   # E8: the actor's reference line, stand-still (offsets 0) in the loss units
+        reference_logs["val_action_output_loss_standstill"] = standstill_huber(val)
     if factor is not None:
         reference_logs["val_next_state_output_loss_zero"] = metrics.state_delta_metrics(
             val["states"][val["pair_index"]], val["states"][val["pair_index"]],
@@ -394,6 +452,10 @@ def train(args):
         n_train_pairs=int(len(train_split["pair_index"])), n_val_pairs=int(len(val["pair_index"])),
         n_train_pairs_untrimmed=int(train_split["n_pairs_untrimmed"]),
         n_val_pairs_untrimmed=int(val["n_pairs_untrimmed"]),
+        batches_per_epoch=batches_per_epoch, batches_per_check=batches_per_check,
+        max_checks=max_checks, patience_checks=patience_checks,
+        vis_every_checks=vis_every_checks,
+        shuffle_order="repeat" if args.val_every else "keras_epochs",
         keep_ranges_sha256=keep_hash,
         train_episodes=np.unique(train_split["episode_index"]).tolist(),
         val_episodes=np.unique(val["episode_index"]).tolist(),
@@ -410,19 +472,21 @@ def train(args):
     run = wandb.init(project=WANDB_PROJECT, name=run_name, config=cfg, mode=args.wandb_mode)
     callbacks = [
         EpochTimer(),
+        TrainingProgress(batches_per_check, batches_per_epoch),
         CheckMonitor(),
         ConstantLogs(reference_logs),
         keras.callbacks.ModelCheckpoint(str(out / "best.weights.h5"), monitor=MONITOR, mode="min",
                                         save_best_only=True, save_weights_only=True, verbose=1),
-        keras.callbacks.EarlyStopping(monitor=MONITOR, mode="min", patience=args.patience,
+        keras.callbacks.EarlyStopping(monitor=MONITOR, mode="min", patience=patience_checks,
                                       verbose=1),
         keras.callbacks.CSVLogger(str(out / "history.csv")),
         keras.callbacks.TensorBoard(log_dir=str(log_dir)),
-        timeline_callback(val, run, log_dir, args.vis_every, root),
+        timeline_callback(val, run, log_dir, vis_every_checks, root),
         WandbLogger(run),
     ]
     t0 = time.time()
-    history = model.fit(train_ds, validation_data=val_ds, epochs=args.epochs,
+    history = model.fit(train_ds, validation_data=val_ds, epochs=max_checks,
+                        steps_per_epoch=args.val_every,   # None = one full pass per "epoch"
                         callbacks=callbacks, verbose=2)
     train_time_min = (time.time() - t0) / 60
 
@@ -433,16 +497,22 @@ def train(args):
     if chunk_base is not None:
         save_json(chunk_base, out / "chunk_baselines.json")
     monitored = history.history[MONITOR]
+    # best_epoch = index of the best check (= the real epoch for normal runs, as before)
     cfg.update(epochs_run=len(monitored), best_epoch=int(np.argmin(monitored)) + 1,
                train_time_min=round(train_time_min, 2))
+    cfg["best_batch"] = cfg["best_epoch"] * batches_per_check
+    cfg["best_epoch_equiv"] = cfg["best_batch"] / batches_per_epoch
     save_json(cfg, out / "config.json")
     save_json(val_metrics, out / "val_metrics.json")
     log_tensorboard(val_metrics, log_dir, cfg["best_epoch"])
     run.summary.update({f"best/{k}": v for k, v in val_metrics.items()})
-    run.summary.update({"best_epoch": cfg["best_epoch"], "train_time_min": cfg["train_time_min"]})
+    run.summary.update({"best_epoch": cfg["best_epoch"], "best_batch": cfg["best_batch"],
+                        "best_epoch_equiv": cfg["best_epoch_equiv"],
+                        "train_time_min": cfg["train_time_min"]})
 
-    print(f"\nbest epoch {cfg['best_epoch']} of {cfg['epochs_run']}, "
-          f"training {train_time_min:.1f} min\n")
+    unit = "check" if args.val_every else "epoch"
+    print(f"\nbest {unit} {cfg['best_epoch']} of {cfg['epochs_run']} (batch {cfg['best_batch']}, "
+          f"{cfg['best_epoch_equiv']:.2f} epochs), training {train_time_min:.1f} min\n")
     print(comparison_table(run_name, val_metrics, root, args.canonical_quaternion, chunk_base,
                            keep_hash))
     if args.max_episodes is None:
@@ -458,6 +528,7 @@ def train(args):
                                 "keep_ranges": Path(args.keep_ranges).name if args.keep_ranges else None,
                                 "epochs": cfg["epochs_run"],
                                 "best_epoch": cfg["best_epoch"],
+                                "val_every": args.val_every, "best_batch": cfg["best_batch"],
                                 "train_time_min": cfg["train_time_min"], **val_metrics})
         print(f"\nadded a row to {metrics.RESULTS_CSV}")
     else:

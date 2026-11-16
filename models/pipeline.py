@@ -13,9 +13,11 @@ INPUT_KEYS = ("image_input", "state_input", "language_input", "action_input")
 TARGET_KEYS = ("action_output", "next_state_output", "next_image_output")
 
 
-def make_dataset(split, batch_size, shuffle=False, seed=0):
+def make_dataset(split, batch_size, shuffle=False, seed=0, repeat=False):
     """Batches of (inputs, targets) dicts over split["pair_index"].
-    shuffle=True: a new (seeded) order every epoch; shuffle=False: fixed order."""
+    shuffle=True: a new (seeded) order every epoch; shuffle=False: fixed order.
+    repeat=True: the passes one after another, endless (for --val-every: Keras
+    steps_per_epoch then cuts this stream into checks of N batches)."""
     pair_index = split["pair_index"].astype(np.int64)
 
     # --- A: one batch in NumPy (reuses get_pairs) ---
@@ -39,5 +41,8 @@ def make_dataset(split, batch_size, shuffle=False, seed=0):
     ds = tf.data.Dataset.from_tensor_slices(pair_index)
     if shuffle:
         ds = ds.shuffle(len(pair_index), seed=seed, reshuffle_each_iteration=True)
-    ds = ds.batch(batch_size).map(tf_batch, num_parallel_calls=tf.data.AUTOTUNE)
+    ds = ds.batch(batch_size)
+    if repeat:   # NEW: after batch, so every pass keeps its own (smaller) last batch
+        ds = ds.repeat()
+    ds = ds.map(tf_batch, num_parallel_calls=tf.data.AUTOTUNE)
     return ds.prefetch(tf.data.AUTOTUNE)
