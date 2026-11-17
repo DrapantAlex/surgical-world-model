@@ -921,3 +921,149 @@ The sign is consistent per episode, but the size is tiny: not significant once t
 - [ ] Step 1c: depthwise convs, WM branch only.
 - [ ] Nice to have: save weights at a few checks and measure prediction spread and correlation on train and val (direct proof of when the inputs start to be used).
 - [ ] Skipped: `--val-every 50` diagnostic (batch 0 and 1,000 are both ≈ stand-still, so it can't change the conclusion).
+
+---
+
+## 2026-11-17
+
+Tags: **[M]** = measured on my files, **[H]** = hypothesis (not tested).
+
+### Today in five lines
+
+- Step 1b (deeper state head, K = 2 and 3, seed 0, `--val-every 1000`): **0 of 47 checks below copy_state**; more depth only adds a little memorisation. [M]
+- The per-joint metrics show that **endo360 (the needle driver) is 94% of the state copy error** (93.5% in radians): the WM state metric mostly measures one joint. [M]
+- endo360 is not commanded by the action, changes on 16% of frames in encoder steps of 0.0006 rad, and contains one-frame glitches (4 events in val = 26% of its copy error). [M]
+- The actor controls only the KUKA arm; the arm is smooth and predictable with history (constant velocity 7–14× better than copy). [M]
+- Next: evaluate KUKA and endo360 separately; ask Michael whether the WM should keep, balance or exclude endo360.
+
+### Step 1b: code (implemented 2026-11-16)
+
+**Commit 1 (`4f9fdac`): measurements only, no model change**
+
+| What was modified | Why | What it does |
+|---|---|---|
+| `val_action_output_loss_trainmean` reference line | 11-16: the actor at its best equals "always predict the mean training offset" | The input-free bar "average training offset" (0.7785 on trimmed val), logged next to stand-still |
+| Per-joint state metrics, each with its own `_copy` line | The aggregate state loss can hide which joint drives it | One val MSE column per state dimension, and the copy_state value of the same dimension |
+
+**Commit 2 (`c578b50`): `--state-layers K`**
+
+| What was modified | Why | What it does |
+|---|---|---|
+| K − 1 extra `Dense(128, relu)` layers before `state_change` | Test Michael's hypothesis "one hidden layer is too simple" | Deeper state head; `state_change` stays zero-initialised and the skip stays, so the untrained model is still copy_state (checked: difference 0.0) |
+| Own seeds for the new layers, `GlorotUniform(seed = seed + 1000 + i)` | Keras draws initial weights from one global sequence in creation order: new layers would shift the decoder's initialisation | Every other layer starts bitwise identical to K = 1 (checked: 0.0 on all 28 shared weight arrays) |
+| `cfg.get("state_layers", 1)`, `cfg.get("seed", 0)` | Old runs have neither key | Old runs stay loadable; +16,512 parameters per extra layer (128 × 128 + 128) |
+
+**Commit 3 (`7eaf2b8`): exact actor metric**
+
+| What was modified | Why | What it does |
+|---|---|---|
+| `val_action_output_huber` | Keras logs the val loss as the mean of batch means, because `tf.numpy_function` hides the batch size: the last batch of 28 pairs counts 32/28 too much (≈ 0.03%) | Exact per-pair Huber, logged at every check. `MONITOR` unchanged (`val_action_output_loss`) |
+
+### Step 1b: my five lines and outcomes
+
+| | | Outcome |
+|---|---|---|
+| Question | Does a deeper state head let the WM beat copy_state on val? | **No.** 0 / 47 checks below copy, K = 2 and 3, overall and on endo360. [M] |
+| Hypothesis | (Michael) one hidden layer is too simple for s(t) → s(t+1). | **Not supported.** [M] |
+| Prediction | Val stays at copy; train goes lower than in 1a. | **Confirmed.** The train ordering is small and from one seed: suggestive, not established. [M] |
+| Surprise | Val below copy at some check by more than the noise. | **Not observed.** Best checks 1.003 (K = 3) and 1.004 (K = 2), both at batch 1,000. [M] |
+| Change | State head only. | **Holds:** encoder, actor and decoder start bitwise identical to K = 1. [M] |
+
+### Step 1b: results
+
+Seed 0, trimmed val, `--val-every 1000`; 47 checks per run (≈ 43 min). [M]
+
+| batch | val state ÷ copy, K = 1 / 2 / 3 | train state ÷ train copy, K = 1 / 2 / 3 |
+|---|---|---|
+| 1,000 | 1.005 / 1.004 / **1.003** | 0.87 / 0.97 / 0.97 |
+| 5,000 | 1.016 / 1.015 / 1.011 | 0.99 / 0.98 / 0.98 |
+| 10,000 | 1.026 / 1.017 / 1.036 | 0.83 / 0.94 / 0.94 |
+| 30,000 | 1.045 / 1.053 / 1.069 | 0.77 / 0.83 / 0.81 |
+| 46,000 | 1.052 / 1.046 / 1.072 | 0.71 / 0.75 / 0.73 |
+| **last ~5 epochs, mean** | **1.051 / 1.060 / 1.072** | **0.84 / 0.82 / 0.80** |
+
+K = 1 is run 1a-val500 (checks every 500 batches, the same batch counts read off). Its values come from the batch-weighted logged loss (≈ 1e-3 relative offset); K = 2 and 3 from the exact per-dimension metrics.
+
+- **The untrained head is exactly copy (1.000); every check after that is worse.** Training only moves the head away from copy, at every depth. [M]
+- **More depth = a bit more memorisation:** train goes further below copy (0.84 → 0.80), val rises a bit more (1.051 → 1.072). The differences are about the size of the check-to-check jitter (±0.01–0.02), one seed each. [M; the trend itself is H]
+- **Per joint:** `kuka_joint_pos[1]` dips below its copy line in 19% of the K = 2 checks (min 0.963), but its median is 1.025 and it carries 1.5% of the error: noise, not a signal. [M]
+- **Actor:** best at the first check (batch 1,000). Exact Huber 0.7813 (K = 2) / 0.7805 (K = 3), just above stand-still (0.7795) and train-mean (0.7785). Then it memorises as in 1a. The state-head depth doesn't change the actor. [M]
+- **Image:** 0.0076 → 0.0023, still ≈ 4× worse than copy_frame (0.0006). [M]
+
+### endo360: three data checks
+
+`scripts/look_endo360.py` (tables only, train + val, 460 episodes, never test; ≈ 6 s). Every check is reported on all frames and on the kept frames (`star_il_tool_visible.csv`); the two agree to within a few %. Check 3 uses the exact val pairs of the runs (17,692; the normalised copy MSE per joint matches `config.json` exactly). Outputs: `outputs/analysis/endo360_checks/`.
+
+**Check 1: what are the large jumps?**
+- *Question:* the top 1% of val pairs carry 69% of the endo360 error. Real fast movements, or an artefact?
+- *Decision rule (written before looking):* |Δ| ≈ 2π or ±π flips → wrap-around; a jump followed within 1–3 frames by an opposite jump of similar size → glitch; neither, and the value stays → real movement.
+
+| | all | kept | run pairs (val) |
+|---|---|---|---|
+| \|Δ\| p50 / p99 / p99.9 / max (rad) | 0 / 0.020 / 0.052 / 0.126 | 0 / 0.020 / 0.056 / 0.126 | 0 / 0.021 / 0.048 / 0.126 |
+| count > 0.1 / > 0.5 / > 1 / > 3 rad (train + val; val) | 66 / 0 / 0 / 0 | 66 / 0 / 0 / 0 | 8 / 0 / 0 / 0 |
+| top 1% share of Σ Δ² | 0.70 | 0.71 | **0.69** |
+
+- *Result:* **glitch branch.** [M]
+  - No wrap-around: the largest |Δ| is 0.126 rad (0.04 π), and all values lie within ±0.396 rad.
+  - The 66 deltas > 0.1 rad are **30 one-frame out-and-back spikes (26 train, 4 val) plus 6 unpaired deltas, in 36 episodes**. Each spike jumps 0.11–0.126 rad toward zero for one frame and comes back (e.g. episode 437: 0.116 → −0.010 → 0.108).
+  - Their size is 173–208 encoder ticks (not one fixed count). All are inside the kept windows.
+  - They are ≈ 0.2% of all endo360 changes, but the **8 val spike deltas (4 events) carry 25.7% of the val endo360 copy error**.
+- "Recording error" is **[H]**: the frame strips (`check1d_*.png`) show no visible tool change, but only at thumbnail size, so they're not conclusive.
+- Per episode (median): range 0.17 rad, net change ≈ 0, path ÷ range 2.4. The joint goes back and forth. [M]
+
+**Check 2: is the staircase a slower sampling rate (sample-and-hold)?**
+- *Decision rule:* one dominant regular gap between change frames while KUKA changes on almost every frame → sample-and-hold; irregular gaps → the joint really stops and starts.
+
+| gap between change frames (kept) | 1 | 2 | 3 | 4 | 5 | 6–15 | > 15 |
+|---|---|---|---|---|---|---|---|
+| count | **15,715** | 3,923 | 1,808 | 907 | 622 | 1,978 | 2,435 |
+
+| share of pairs that change (kept) | endo360 | KUKA joints | action dims |
+|---|---|---|---|
+| | **16%** | 87–99.7% | 99.8–99.9% |
+
+- *Result:* **sample-and-hold not supported.** [M]
+  - The most common gap is 1 frame (63% of gaps ≤ 15), and the counts fall off steadily: the sensor reports changes on consecutive frames at 30 Hz.
+  - 100% of the non-zero |Δ| are integer multiples of **0.0006059 rad** (0.035°, encoder ticks). The most common step is 1 tick, then 8, 7 and 2.
+- It fits neither branch cleanly: the gaps are irregular, but mostly short. **[H]:** slow motion below one tick per frame (< 0.018 rad/s ≈ 1°/s) shows up as irregular single ticks.
+
+**Check 3: is "endo360 = 94% of the error" real, or a normalisation effect?**
+- *Decision rule:* endo360 still ≳ 80% of the copy error in radians → real; much smaller → normalisation effect.
+
+| val run pairs (n = 17,692) | share, rad² | share, normalised | RMSE (°/frame) | train std (rad) |
+|---|---|---|---|---|
+| endo360 | **93.5%** | **94.0%** | 0.27 | 0.140 |
+| each KUKA joint | 0.05–1.7% | 0.02–2.7% | 0.006–0.037 | 0.110–0.962 |
+| endo360, top 1% pairs removed | 81.9% | 82.8% | 0.15 | |
+
+- *Result:* **real.** [M] endo360's std is in the same range as the KUKA stds (only joint 6, 0.96 rad, is an outlier), so normalisation barely changes the shares. Each endo360 step (0.004–0.05 rad) is 10–40× larger than a KUKA joint's per-frame change.
+
+### What it means
+
+- **The state is two problems.** [M for the properties; H that endo360 is unpredictable from the inputs]
+  - The KUKA arm: smooth, commanded (the action is its pose), predictable with history.
+  - endo360: rare tick steps, not commanded, back and forth, plus glitches.
+- **The WM's state loss and metric are 82–94% endo360,** a joint the actor doesn't control. [M] This hides what the WM does on the arm, and probably pulls its state effort away from it. [H]
+- **1a and 1b weren't failing "on the state" in general,** but mostly on one joint that may be unpredictable by construction. [H]
+- **Whether the WM can beat copy on the KUKA joints is still open:** KUKA ratio over the checks 1.01–1.34. [M] Two hypotheses [H]: endo360 dominates the loss, or the per-frame KUKA change is tiny compared with the absolute values the network sees.
+- **This doesn't change what the actor must learn, but it changes how the WM must be trained and evaluated.**
+
+### Corrections
+
+- "The needle driver moves in sparse, unpredictable bursts": this was **my interpretation of measured statistics** (83% still, top 1% = 69%, lag-1 correlation −0.04), not from a paper. Measured today: rare tick steps going back and forth, plus one-frame glitches that make up a large share of the "bursts".
+- "Sample-and-hold staircase" [H, 11-17] → **not supported** (check 2).
+- "The large jumps are wrap-arounds" [H] → **no:** one-frame glitches (check 1).
+- "94% is a normalisation artefact" [H] → **no:** 93.5% in radians (check 3).
+- `instruction.text` is "suture throw" in every frame [M, 8,635 pairs, train episodes 0–19]: no usable subtask labels, although the README mentions subtask-specific instructions.
+
+### Next steps
+
+- [x] 1b, K = 2 and 3, seed 0.
+- [x] endo360 checks 1–3.
+- [x] Are all glitches the same number of encoder ticks? No: 173–208 ticks. [M]
+- [ ] Split the state evaluation: KUKA (vs copy and constant velocity) and endo360 (vs copy), always reported separately.
+- [ ] Report endo360 with and without the glitch pairs.
+- [ ] Look at the glitch frame strips at full size.
+- [ ] Ask Michael: keep, balance or exclude endo360 in the WM state target? Repair the glitches? 1c as planned, or history earlier?
+- [ ] Decide whether to commit `scripts/look_endo360.py` as the evidence for the checks.
