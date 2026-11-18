@@ -231,13 +231,15 @@ def build_model(cfg, stats):
                         "next_state_output": "mse" if factor is None else scaled_huber(factor),
                         "next_image_output": "mse"},
                   loss_weights=loss_weights(cfg),
-                  # metrics only (no gradient): the exact per-pair actor Huber (Keras logs the
-                  # LOSS as an unweighted mean of batch means, see standstill_huber; metrics are
-                  # averaged per sample) and the per-dimension state error
+                  # metrics only (no gradient): the exact per-pair actor Huber and image MSE (Keras
+                  # logs the LOSS as an unweighted mean of batch means, see standstill_huber;
+                  # metrics are averaged per sample) and the per-dimension state error
                   metrics={"action_output":
                            [keras.metrics.MeanMetricWrapper(keras.losses.huber, name="huber")],
                            "next_state_output":
-                           state_dim_metrics(data.feature_names(dataset_root(cfg))[0])})
+                           state_dim_metrics(data.feature_names(dataset_root(cfg))[0]),
+                           "next_image_output":
+                           [keras.metrics.MeanMetricWrapper(keras.losses.mse, name="mse")]})
     return model
 
 def copy_state_mse(split):
@@ -254,6 +256,17 @@ def copy_state_mse_per_dim(split):
     t = split["pair_index"]
     diff = split["states"][t + 1].astype(np.float64) - split["states"][t].astype(np.float64)
     return np.mean(diff ** 2, axis=0)
+
+def copy_frame_mse(split, chunk=256):
+    """Val MSE of "next frame = current frame" (copy_frame): images in [0, 1] through get_pairs
+    (the model's own inputs and targets), in chunks so the split never exists as float. Every
+    pair has the same pixel count, so the overall mean = mean over pixels, then over pairs
+    (= the per-pair metric val_next_image_output_mse). Same code as scripts/baselines.py."""
+    t, image = split["pair_index"], metrics.ImageMSE()
+    for i in range(0, len(t), chunk):
+        inputs, targets = data.get_pairs(split, t[i:i + chunk])
+        image.update(inputs["image_input"], targets["next_image_output"])
+    return image.result()
 
 def prev_in_window(split, keep_ranges):
     """For each pair t: is s(t-1) in the same episode AND inside its kept window? (Frames
@@ -576,6 +589,9 @@ def train(args):
     # reference lines for the state branch, flat in every epoch's logs and saved in config.json:
     # copy_state (every run; 1a: the untrained --state-skip model) and, for E7, f = 0
     reference_logs = {"val_next_state_output_loss_copy": copy_state_mse(val)}
+    # the image branch's reference: copy_frame (one pass over the val frames, in chunks)
+    reference_logs["val_next_image_output_loss_copyframe"] = copy_frame_mse(val)
+    print(f"copy_frame val image MSE: {reference_logs['val_next_image_output_loss_copyframe']:.6g}")
     # copy_state per state dimension, next to the per-dimension val metrics (same names)
     state_names = data.feature_names(root)[0]
     copy_dim = copy_state_mse_per_dim(val)
