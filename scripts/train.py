@@ -49,6 +49,9 @@ MONITOR = "val_action_output_loss"     # best checkpoint and early stopping (kep
 WANDB_PROJECT = "surgical-world-model"
 DELTA_FLOOR_C = 0.25   # --state-delta: scale = max(median|Δ|, DELTA_FLOOR_C * mean|Δ|) per dim
 CHUNK_FLOOR_C = 0.25   # --chunk: scale = max(median, CHUNK_FLOOR_C * mean) of each group's offset norm
+GLITCH_G = 5           # glitch report (evaluation only): a one-frame jump > GLITCH_G x the train p99
+                       # of |Δ| of that dim that comes back (glitch_frames); STAR-IL endo360: the
+                       # 0.11-0.126 rad spikes of scripts/look_endo360.py
 OUTPUTS, LOGS = Path("outputs"), Path("logs")
 
 
@@ -252,6 +255,71 @@ def copy_state_mse_per_dim(split):
     diff = split["states"][t + 1].astype(np.float64) - split["states"][t].astype(np.float64)
     return np.mean(diff ** 2, axis=0)
 
+def prev_in_window(split, keep_ranges):
+    """For each pair t: is s(t-1) in the same episode AND inside its kept window? (Frames
+    outside the window exist in the split, but the run never uses them.)"""
+    t, ep = split["pair_index"], split["episode_index"]
+    episodes, starts, lengths = np.unique(ep, return_index=True, return_counts=True)
+    first_kept = np.empty(len(ep), np.int64)   # first kept row of each row's episode
+    for e, s, T in zip(episodes, starts, lengths):
+        first_kept[s:s + T] = s + data.kept_window(int(e), int(T), keep_ranges)[0]
+    return t - 1 >= first_kept[t]
+
+def constvel_state(split, keep_ranges):
+    """Constant velocity s(t) + (s(t) - s(t-1)) for every pair (normalised units); copy (Δ = 0)
+    where s(t-1) is not available (prev_in_window). Returns (prediction, n_fallback_pairs)."""
+    t, s = split["pair_index"], split["states"]
+    ok = prev_in_window(split, keep_ranges)
+    vel = np.where(ok[:, None], s[t].astype(np.float64) - s[t - 1], 0.0)
+    return s[t] + vel, int((~ok).sum())
+
+def constvel_state_mse_per_dim(split, keep_ranges):
+    """Constant-velocity val MSE per state dim (mean over pairs), and the fallback count."""
+    pred, n_fallback = constvel_state(split, keep_ranges)
+    t = split["pair_index"]
+    return np.mean((pred - split["states"][t + 1]) ** 2, axis=0), n_fallback
+
+def glitch_thresholds(train_split):
+    """Per state dim: GLITCH_G x the p99 of |s(t+1) - s(t)| over the TRAIN pairs (normalised)."""
+    t, s = train_split["pair_index"], train_split["states"].astype(np.float64)
+    return GLITCH_G * np.percentile(np.abs(s[t + 1] - s[t]), 99, axis=0)
+
+def glitch_frames(split, thresholds):
+    """(N, D) bool: frame t of dim d is a one-frame glitch if, within one episode,
+    |s(t) - s(t-1)| > threshold (and threshold > 0), the next step goes the opposite way, and
+    the value comes back: |s(t+1) - s(t-1)| < 0.2 |s(t) - s(t-1)| (this also makes the two steps
+    of similar size, 0.8-1.2x). Uses the episode's full rows, not only the kept window."""
+    s, ep = split["states"].astype(np.float64), split["episode_index"]
+    before, after, back = s[1:-1] - s[:-2], s[2:] - s[1:-1], s[2:] - s[:-2]
+    same = ((ep[:-2] == ep[1:-1]) & (ep[1:-1] == ep[2:]))[:, None]
+    g = (same & (thresholds > 0) & (np.abs(before) > thresholds)
+         & (np.sign(after) == -np.sign(before)) & (np.abs(back) < 0.2 * np.abs(before)))
+    out = np.zeros(s.shape, bool)
+    out[1:-1] = g
+    return out
+
+def state_group_metrics(pred_state, split, names, keep_ranges, thresholds):
+    """Per state group (data.state_groups): model, copy_state and constant-velocity MSE
+    (normalised), with all val pairs and without the glitch pairs (state t or t+1 is a glitch
+    frame in any dim of the group), plus the glitch counts. Measurement only."""
+    t = split["pair_index"]
+    cur, true = split["states"][t].astype(np.float64), split["states"][t + 1]
+    constvel, n_fallback = constvel_state(split, keep_ranges)
+    preds = {"model": pred_state, "copy": cur, "constvel": constvel}
+    glitch = glitch_frames(split, thresholds)
+    used = np.unique(np.concatenate([t, t + 1]))   # frames the val pairs touch
+    m = {"state_group/n_constvel_fallback_pairs": float(n_fallback)}
+    for g, dims in data.state_groups(names).items():
+        key = f"state_group/{metric_name(g)}"
+        bad = glitch[t][:, dims].any(1) | glitch[t + 1][:, dims].any(1)
+        m[f"{key}/n_glitch_frames"] = float(glitch[used][:, dims].any(1).sum())
+        m[f"{key}/n_glitch_pairs"] = float(bad.sum())
+        for who, p in preds.items():
+            err = (np.asarray(p, np.float64)[:, dims] - true[:, dims]) ** 2
+            m[f"{key}/{who}_mse"] = float(err.mean())
+            m[f"{key}/{who}_mse_noglitch"] = float(err[~bad].mean()) if (~bad).any() else float("nan")
+    return m
+
 def trainmean_huber(train, val):
     """E8: val action loss of the input-free rule "always predict the mean TRAIN chunk target"
     (normalised units), with the compiled Huber() like standstill_huber. The bar a model must
@@ -272,8 +340,9 @@ def checks(x_epochs, batches_per_epoch, val_every):
     """--val-every: a count in real epochs -> the number of checks (N batches each) it spans."""
     return int(np.ceil(x_epochs * batches_per_epoch / val_every))
 
-def evaluate(model, val, stats, batch_size, root, factor=None):
-    """Predict every val pair (fixed order) and measure it with models/metrics.py."""
+def evaluate(model, val, stats, batch_size, root, factor=None, keep_ranges=None, glitch_thr=None):
+    """Predict every val pair (fixed order) and measure it with models/metrics.py.
+    glitch_thr (glitch_thresholds of the train split): adds the per-group state report."""
     pred_action, true_action, pred_state, image = [], [], [], metrics.ImageMSE()
     for inputs, targets in make_dataset(val, batch_size, shuffle=False):
         a, s, img = model(inputs, training=False)
@@ -293,6 +362,9 @@ def evaluate(model, val, stats, batch_size, root, factor=None):
     m.update(metrics.next_state_metrics(np.concatenate(pred_state), val["states"][t + 1], stats,
                                         physical, state_names))
     m["next_state_mse_copy"] = copy_state_mse(val)   # 1a: reference for next_state_mse, same pairs
+    if glitch_thr is not None:   # per group: model / copy / constant velocity, with and without glitches
+        m.update(state_group_metrics(np.concatenate(pred_state), val, state_names, keep_ranges,
+                                     glitch_thr))
     if factor is not None:   # E7: the loss on the change, model vs f = 0
         m.update(metrics.state_delta_metrics(np.concatenate(pred_state), val["states"][t],
                                              val["states"][t + 1], factor))
@@ -388,13 +460,33 @@ class ConstantLogs(keras.callbacks.Callback):
         if logs is not None:
             logs.update(self.values)
 
+class StateGroupLogs(keras.callbacks.Callback):
+    """Adds (val_)next_state_<group>_mse = the mean of the group's per-dimension metrics
+    (state_dim_metrics). Every per-dim metric averages over the same samples, so this is
+    exactly the group's MSE. groups: {group metric name: [dim metric names]}."""
+    def __init__(self, groups):
+        super().__init__()
+        self.groups = groups
+
+    def on_epoch_end(self, epoch, logs=None):
+        if logs is None:
+            return
+        for prefix in ("", "val_"):
+            for g, dims in self.groups.items():
+                keys = [f"{prefix}next_state_output_mse_{d}" for d in dims]
+                if all(k in logs for k in keys):
+                    logs[f"{prefix}next_state_{g}_mse"] = float(np.mean([logs[k] for k in keys]))
+
 class WandbLogger(keras.callbacks.Callback):
+    """Every log value except the per-dimension state columns and their _copy lines
+    (kept in history.csv and TensorBoard; W&B gets the per-group columns instead)."""
     def __init__(self, run):
         super().__init__()
         self.run = run
 
     def on_epoch_end(self, epoch, logs=None):
-        self.run.log({k: float(v) for k, v in (logs or {}).items()}, step=epoch)
+        self.run.log({k: float(v) for k, v in (logs or {}).items()
+                      if "next_state_output_mse_" not in k}, step=epoch)
 
 def timeline_callback(val, run, log_dir, every, root):
     """The existing GT/PRED timeline, on the first validation episode (8 frames, 10 apart)."""
@@ -485,8 +577,18 @@ def train(args):
     # copy_state (every run; 1a: the untrained --state-skip model) and, for E7, f = 0
     reference_logs = {"val_next_state_output_loss_copy": copy_state_mse(val)}
     # copy_state per state dimension, next to the per-dimension val metrics (same names)
-    for name, value in zip(data.feature_names(root)[0], copy_state_mse_per_dim(val)):
+    state_names = data.feature_names(root)[0]
+    copy_dim = copy_state_mse_per_dim(val)
+    for name, value in zip(state_names, copy_dim):
         reference_logs[f"val_next_state_output_mse_{metric_name(name)}_copy"] = float(value)
+    # per state group (data.state_groups): copy_state and constant velocity, next to the
+    # group curves of StateGroupLogs (the mean of the group's per-dim values)
+    groups = data.state_groups(state_names)
+    constvel_dim, n_fallback = constvel_state_mse_per_dim(val, keep_ranges)
+    for g, dims in groups.items():
+        reference_logs[f"val_next_state_{metric_name(g)}_mse_copy"] = float(copy_dim[dims].mean())
+        reference_logs[f"val_next_state_{metric_name(g)}_mse_constvel"] = float(constvel_dim[dims].mean())
+    glitch_thr = glitch_thresholds(train_split)   # for the glitch report of the final evaluation
     if args.chunk:   # E8: the actor's reference lines, in the loss units:
         # stand-still (offsets 0) and the input-free mean train offset
         reference_logs["val_action_output_loss_standstill"] = standstill_huber(val)
@@ -514,6 +616,8 @@ def train(args):
         max_checks=max_checks, patience_checks=patience_checks,
         vis_every_checks=vis_every_checks,
         shuffle_order="repeat" if args.val_every else "keras_epochs",
+        n_val_constvel_fallback=n_fallback,   # pairs without s(t-1) in the kept window: copy
+        glitch_threshold=glitch_thr.tolist(),  # per state dim, normalised (GLITCH_G x train p99 |Δ|)
         keep_ranges_sha256=keep_hash,
         train_episodes=np.unique(train_split["episode_index"]).tolist(),
         val_episodes=np.unique(val["episode_index"]).tolist(),
@@ -533,6 +637,8 @@ def train(args):
         TrainingProgress(batches_per_check, batches_per_epoch),
         CheckMonitor(),
         ConstantLogs(reference_logs),
+        StateGroupLogs({metric_name(g): [metric_name(state_names[i]) for i in dims]
+                        for g, dims in groups.items()}),
         keras.callbacks.ModelCheckpoint(str(out / "best.weights.h5"), monitor=MONITOR, mode="min",
                                         save_best_only=True, save_weights_only=True, verbose=1),
         keras.callbacks.EarlyStopping(monitor=MONITOR, mode="min", patience=patience_checks,
@@ -550,7 +656,7 @@ def train(args):
 
     # --- E: evaluate the BEST weights with the same metrics as the baselines ---
     model.load_weights(str(out / "best.weights.h5"))
-    val_metrics = evaluate(model, val, stats, args.batch_size, root, factor)
+    val_metrics = evaluate(model, val, stats, args.batch_size, root, factor, keep_ranges, glitch_thr)
     chunk_base = chunk_baseline_metrics(val, stats, root) if args.chunk else None
     if chunk_base is not None:
         save_json(chunk_base, out / "chunk_baselines.json")
@@ -604,6 +710,13 @@ def eval_only(args):
     quat_ref = run_quat_ref(cfg, out)
     keep_ranges = run_keep_ranges(cfg, out)        # None: untrimmed (and older runs)
     keep_hash = cfg.get("keep_ranges_sha256")
+    # glitch thresholds from the run's own train split (tables only), as in train(); always the
+    # run's keep ranges, also with --eval-keep-ranges (older runs did not save them)
+    train_tables = data.load_split("train", root=root, stats=stats, quat_ref=quat_ref,
+                                   episodes=episodes_for("train", cfg["max_episodes"], root),
+                                   chunk=cfg.get("chunk"), keep_ranges=keep_ranges,
+                                   with_frames=False)
+    glitch_thr = glitch_thresholds(train_tables)
     if args.eval_keep_ranges:   # other pairs, same weights and statistics (nothing recomputed)
         keep_ranges = data.load_keep_ranges(args.eval_keep_ranges)
         keep_hash = data.file_sha256(args.eval_keep_ranges)
@@ -614,11 +727,18 @@ def eval_only(args):
                           keep_ranges=keep_ranges)
     model = build_model(cfg, stats)
     model.load_weights(str(out / "best.weights.h5"))
-    val_metrics = evaluate(model, val, stats, cfg["batch_size"], root, delta_factor(cfg, stats))
+    val_metrics = evaluate(model, val, stats, cfg["batch_size"], root, delta_factor(cfg, stats),
+                           keep_ranges, glitch_thr)
     chunk_base = chunk_baseline_metrics(val, stats, root) if cfg.get("chunk") else None
     model_mse, copy_mse = val_metrics["next_state_mse"], val_metrics["next_state_mse_copy"]
     copy_line = (f"next_state_mse: model {model_mse:.3g} vs copy_state {copy_mse:.3g} "
                  f"(model / copy = {model_mse / copy_mse:.2f})")
+    for g in data.state_groups(data.feature_names(root)[0]):
+        k = f"state_group/{metric_name(g)}"
+        copy_line += "\n" + " ".join(
+            f"{g} {who}: model / copy = {val_metrics[f'{k}/model_mse{sfx}'] / val_metrics[f'{k}/copy_mse{sfx}']:.3f}, "
+            f"constvel / copy = {val_metrics[f'{k}/constvel_mse{sfx}'] / val_metrics[f'{k}/copy_mse{sfx}']:.3f};"
+            for who, sfx in (("all pairs", ""), ("no glitch", "_noglitch")))
     if args.eval_keep_ranges:   # its own JSON: val_metrics*.json of the run stay untouched
         path = out / f"val_metrics_keep_{Path(args.eval_keep_ranges).stem}.json"
         save_json({"keep_ranges": args.eval_keep_ranges, "keep_ranges_sha256": keep_hash,

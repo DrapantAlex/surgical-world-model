@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 
 import av
@@ -230,6 +231,19 @@ def action_groups(names):
                 by_prefix[prefix] = []
                 groups.append(by_prefix[prefix])
             by_prefix[prefix].append(i)
+    return groups
+
+def state_groups(names):
+    """State dims grouped by their base feature name, for per-group metrics (measurement only):
+    a trailing index "[i]" is removed ("kuka_joint_pos[3]" -> "kuka_joint_pos"), otherwise the
+    last ".part" ("psm1_pose.position.x" -> "psm1_pose.position"); a name with neither is a
+    group of its own ("psm1_jaw"). Returns {group: [indices]}, in order of first appearance."""
+    groups = {}
+    for i, n in enumerate(names):
+        base = re.sub(r"\[\d+\]$", "", n)
+        if base == n and "." in n:
+            base = n.rsplit(".", 1)[0]
+        groups.setdefault(base, []).append(i)
     return groups
 
 def compute_chunk_scale(episodes, root=ROOT, quat_ref=None, k=16, floor_c=0.25, keep_ranges=None):
