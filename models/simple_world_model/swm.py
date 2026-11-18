@@ -8,12 +8,14 @@ from models.encoders import build_encoder
 IMG_H, IMG_W = 224, 224
 LANG_DIM = 512
 LATENT_DIM = 512   # NEW: size of the bottleneck
+WM_MIXER_KERNEL = 7   # NEW (1c): depthwise kernel of the WM ConvMixer blocks (7 x 7 of the 14 x 14 map)
 
 # CHANGED: state_dim / action_dim have no default; pass data.feature_dims(root)
 def build_actor_world_model(state_dim, action_dim, img_h=IMG_H, img_w=IMG_W, lang_dim=LANG_DIM,
                             latent_dim=LATENT_DIM, encoder="simple_cnn",
                             freeze_encoder=False, unfreeze_last_n=0, delta_factor=None,
-                            action_chunk=None, state_skip=False, state_layers=1, init_seed=0):
+                            action_chunk=None, state_skip=False, state_layers=1, init_seed=0,
+                            wm_mixer_blocks=0):
     # NEW (E7): delta_factor = data.state_delta_factor(stats) -> the state head predicts the
     #   change f (in Δ/scale units) and next_state = state + delta_factor * f; None = original
     # NEW (E8): action_chunk = k -> the actor predicts k offsets from a(t-1), shape (k, action_dim)
@@ -21,10 +23,17 @@ def build_actor_world_model(state_dim, action_dim, img_h=IMG_H, img_w=IMG_W, lan
     #   the untrained model is exactly copy_state; same loss (MSE) and targets as the original
     # NEW (1b): state_layers = K hidden Dense(128, relu) layers in the state head; 1 = original;
     #   init_seed (the run's --seed) seeds the K-1 extra layers' initialisers
+    # NEW (1c): wm_mixer_blocks = D residual ConvMixer blocks on the encoder map, read by the WM
+    #   branch only (both heads); 0 = original. Each block starts as the identity.
     if state_skip and delta_factor is not None:
         raise ValueError("state_skip and delta_factor are two different state heads: choose one")
     if state_layers < 1:
         raise ValueError(f"state_layers must be >= 1, got {state_layers}")
+    if wm_mixer_blocks < 0:
+        raise ValueError(f"wm_mixer_blocks must be >= 0, got {wm_mixer_blocks}")
+    if wm_mixer_blocks > 0 and encoder != "simple_cnn":
+        # Keras Applications backbones return pooling="avg": no spatial map left (step 6)
+        raise ValueError(f"wm_mixer_blocks needs the spatial map of simple_cnn, not {encoder!r}")
     # --- A: inputs ---
     image_input = keras.Input(shape=(img_h, img_w, 3), name="image_input")
     state_input = keras.Input(shape=(state_dim,), name="state_input")
@@ -47,8 +56,35 @@ def build_actor_world_model(state_dim, action_dim, img_h=IMG_H, img_w=IMG_W, lan
         action_output = layers.Reshape((action_chunk, action_dim), name="action_output")(a_x)
 
     # --- D: world-model branch ---
+    wm_img = encoded_img
+    if wm_mixer_blocks > 0:
+        # NEW (1c): the flat encoder output back to its map (feat_h, feat_w, C), D blocks, flat again.
+        #   Original ConvMixer: x = BN(gelu(Depthwise(x))) + x ; x = BN(gelu(Pointwise(x))).
+        #   Here the residual wraps the WHOLE block, y = x + Pointwise(relu(Depthwise(x))), with
+        #   Pointwise zero-initialised (kernel and bias): every block starts as y = x, so the
+        #   untrained model equals the D = 0 model exactly (like 1a for the state). No
+        #   normalisation and no activation after the addition, so nothing breaks that identity.
+        #   Every new layer has an explicit name (Keras auto-names per class: an unnamed Reshape
+        #   would rename the decoder's) and no draw from the global initialiser sequence
+        #   (Depthwise: own seeded Glorot, as in 1b; biases and Pointwise: zeros).
+        n_pos = feat_h * feat_w
+        if encoded_img.shape[-1] % n_pos != 0:
+            raise ValueError(f"encoder output {encoded_img.shape[-1]} is not a "
+                             f"{feat_h} x {feat_w} x C map")
+        C = encoded_img.shape[-1] // n_pos
+        x = layers.Reshape((feat_h, feat_w, C), name="wm_map")(encoded_img)
+        for i in range(wm_mixer_blocks):
+            h = layers.DepthwiseConv2D(
+                WM_MIXER_KERNEL, padding="same", activation="relu",
+                depthwise_initializer=keras.initializers.GlorotUniform(seed=init_seed + 2000 + i),
+                name=f"wm_mixer_dw_{i}")(x)                                   # 1. move: each channel, 7×7 neighbourhood
+            h = layers.Conv2D(
+                C, 1, kernel_initializer="zeros", bias_initializer="zeros",
+                name=f"wm_mixer_pw_{i}")(h)                                   # 2. combine channels, starts at 0
+            x = layers.Add(name=f"wm_mixer_add_{i}")([x, h])                  # 3. residual: x + correction
+        wm_img = layers.Flatten(name="wm_flat")(x)
     wm_features = layers.Concatenate()(
-        [encoded_img, state_input, language_input, action_input])
+        [wm_img, state_input, language_input, action_input])   # 1c: wm_img (actor: encoded_img)
 
     s_x = layers.Dense(128, activation="relu")(wm_features)
     # NEW (1b): deeper state head. Keras draws initial weights in layer-creation order from one

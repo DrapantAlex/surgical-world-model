@@ -15,6 +15,7 @@ The test split is never loaded.
   python -m scripts.train ... --state-delta   # E7: WM state head predicts the change (skip)
   python -m scripts.train ... --state-skip    # 1a: state + zero-initialised Dense, MSE (starts = copy)
   python -m scripts.train ... --state-layers 3   # 1b: 3 hidden Dense(128) in the state head
+  python -m scripts.train ... --wm-mixer-blocks 3   # 1c: 3 ConvMixer blocks in the WM branch
   python -m scripts.train ... --chunk 16      # E8: actor predicts 16 offsets from a(t-1)
   python -m scripts.train ... --keep-ranges configs/keep_ranges/star_il_tool_visible.csv
                                               # only the kept frames (pairs + statistics)
@@ -37,7 +38,7 @@ from tensorflow import keras
 from models import data, metrics
 from models.encoders import ENCODERS
 from models.pipeline import make_dataset
-from models.simple_world_model.swm import build_actor_world_model
+from models.simple_world_model.swm import WM_MIXER_KERNEL, build_actor_world_model
 from models.visualization import WorldModelTimelineCallback
 
 # --- 0: fixed choices (deliberately not command-line options) ---
@@ -90,6 +91,9 @@ def parse_args():
                         "copy_state); loss stays MSE on the normalised next state")
     p.add_argument("--state-layers", type=int, default=1,
                    help="1b: hidden Dense(128, relu) layers in the WM state head (1 = original)")
+    p.add_argument("--wm-mixer-blocks", type=int, default=0,
+                   help="1c: residual ConvMixer blocks on the encoder map, WM branch only "
+                        "(both heads; 0 = original; simple_cnn only)")
     p.add_argument("--chunk", type=int, default=None,
                    help="E8: actor predicts this many offsets a(t+i) - a(t-1), option-C scale "
                         "per step and group (saved in norm_stats.json); default: a(t) only")
@@ -118,6 +122,8 @@ def parse_args():
         p.error("--val-every must be a positive number of batches")
     if args.state_layers < 1:
         p.error("--state-layers must be >= 1")
+    if args.wm_mixer_blocks < 0:
+        p.error("--wm-mixer-blocks must be >= 0")
     if args.state_skip and args.state_delta:
         p.error("--state-skip and --state-delta are two different state heads: choose one")
     # keep-ranges files are checked here, before the run folder exists
@@ -225,7 +231,8 @@ def build_model(cfg, stats):
                                     delta_factor=factor, action_chunk=cfg.get("chunk"),
                                     state_skip=cfg.get("state_skip", False),   # 1a; older runs: off
                                     state_layers=cfg.get("state_layers", 1),   # 1b; older runs: 1
-                                    init_seed=cfg.get("seed", 0))   # 1b: seeds of the extra state layers
+                                    init_seed=cfg.get("seed", 0),   # 1b/1c: seeds of the extra layers
+                                    wm_mixer_blocks=cfg.get("wm_mixer_blocks", 0))   # 1c; older runs: 0
     model.compile(optimizer=keras.optimizers.Adam(learning_rate=cfg["lr"]),
                   loss={"action_output": keras.losses.Huber(),
                         "next_state_output": "mse" if factor is None else scaled_huber(factor),
@@ -623,6 +630,7 @@ def train(args):
             raise AssertionError(f"untrained --state-skip model is not copy_state (gap {gap})")
     cfg.update(
         freeze=freeze_label(cfg), monitor=MONITOR, loss_weights=loss_weights(cfg),
+        wm_mixer_kernel=WM_MIXER_KERNEL,   # 1c: fixed in swm.py, recorded with every run
         params_total=int(model.count_params()),
         params_trainable=int(sum(np.prod(w.shape) for w in model.trainable_weights)),
         n_train_pairs=int(len(train_split["pair_index"])), n_val_pairs=int(len(val["pair_index"])),
@@ -705,6 +713,7 @@ def train(args):
                                 "w_next_image": args.w_next_image,
                                 "state_delta": args.state_delta, "state_skip": args.state_skip,
                                 "state_layers": args.state_layers,
+                                "wm_mixer_blocks": args.wm_mixer_blocks,
                                 "chunk": args.chunk,
                                 "keep_ranges": Path(args.keep_ranges).name if args.keep_ranges else None,
                                 "epochs": cfg["epochs_run"],
