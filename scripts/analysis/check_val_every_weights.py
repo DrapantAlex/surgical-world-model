@@ -15,6 +15,7 @@ Result (2026-11-16), deterministic smokes (STAR-IL trimmed, 2 episodes, --chunk 
   python -m scripts.analysis.check_val_every_weights <train args incl. --deterministic>   # one run
   python -m scripts.analysis.check_val_every_weights compare <run with --val-every> <normal run>
 """
+import json
 import sys
 from pathlib import Path
 
@@ -53,34 +54,38 @@ def same(a, b):
 
 
 def compare(run_checks, run_epochs):
-    files = sorted((T.OUTPUTS / run_epochs).glob("after_batch_*.weights.h5"))
-    ok = True
-    for f in files:
-        batches = int(f.stem.split("_")[2].split(".")[0])
-        a, b = read_h5(weights_path(run_checks, batches)), read_h5(f)
-        equal = same(a, b)
-        ok &= equal
-        max_diff = max(float(np.max(np.abs(a[k].astype(np.float64) - b[k]))) for k in a if a[k].size)
-        print(f"after {batches} batches: {len(a)} weight arrays, bitwise equal: {equal} "
-              f"(max |diff| {max_diff:.1e})")
-    # control: the test is not trivial (training really moves the weights between checks)
-    w11, w22 = read_h5(weights_path(run_checks, 11)), read_h5(weights_path(run_checks, 22))
-    print(f"control: batch 11 vs batch 22 differ: {not same(w11, w22)}")
-    ok &= not same(w11, w22)
-    # the val losses of the matching rows
+    """Per epoch of the normal run: weights and val_* columns of the --val-every run at the
+    same number of batches. Epoch 1 must be identical (the extra validation changes nothing);
+    from epoch 2 on they are expected to differ: Keras 3.15 draws two reshuffles between normal
+    epochs, .repeat() one (docstring). Exit 1 only if epoch 1 differs or the control fails."""
+    per_epoch = json.loads((T.OUTPUTS / run_epochs / "config.json").read_text())["batches_per_epoch"]
     h_c = pd.read_csv(T.OUTPUTS / run_checks / "history.csv").set_index("batches_seen")
     h_e = pd.read_csv(T.OUTPUTS / run_epochs / "history.csv").set_index("batches_seen")
     cols = [c for c in h_e.columns if c.startswith("val_")]
-    rows = h_c.loc[h_e.index, cols]
-    print(rows[["val_action_output_loss", "val_loss"]].assign(
+    print(h_c.loc[h_e.index, ["val_action_output_loss", "val_loss"]].assign(
         normal_action=h_e["val_action_output_loss"], normal_total=h_e["val_loss"]).to_string())
-    val_equal = bool((rows.values == h_e[cols].values).all())
-    print(f"all {len(cols)} val_* columns equal at those rows: {val_equal}")
-    ok &= val_equal
-    print("SAME TRAINING" if ok else "DIFFERENT")
-    if not ok:
+    verdicts = []
+    for f in sorted((T.OUTPUTS / run_epochs).glob("after_batch_*.weights.h5")):
+        batches = int(f.stem.split("_")[2].split(".")[0])
+        epoch = batches // per_epoch
+        a, b = read_h5(weights_path(run_checks, batches)), read_h5(f)
+        max_diff = max(float(np.max(np.abs(a[k].astype(np.float64) - b[k]))) for k in a if a[k].size)
+        val_equal = bool((h_c.loc[batches, cols].values == h_e.loc[batches, cols].values).all())
+        identical = same(a, b) and val_equal
+        verdicts.append((epoch, identical))
+        why = "" if identical or epoch == 1 else ", expected: Keras shuffle order"
+        print(f"epoch {epoch} (batch {batches}): {'IDENTICAL' if identical else 'DIFFERENT'}{why} "
+              f"({len(a)} weight arrays, max |diff| {max_diff:.1e}; {len(cols)} val_* columns equal: {val_equal})")
+    # control: the test is not trivial (training really moves the weights between checks)
+    w11, w22 = read_h5(weights_path(run_checks, 11)), read_h5(weights_path(run_checks, 22))
+    control = not same(w11, w22)
+    print(f"control: batch 11 vs batch 22 differ: {control}")
+    print("; ".join(f"epoch {e}: {'IDENTICAL' if i else 'DIFFERENT'}" for e, i in verdicts))
+    epoch1 = dict(verdicts).get(1, False)
+    if not (epoch1 and control):
+        print("UNEXPECTED: epoch 1 must be identical and the control must differ")
         raise SystemExit(1)
-
+    print("as expected: --val-every does not change training (epoch 1); later epochs differ by the data order")
 
 if __name__ == "__main__":
     if sys.argv[1] == "compare":
