@@ -13,8 +13,8 @@ E7 run's norm_stats.json, so this is exactly the training target
   - train mean: f = per-joint mean of the train targets (best input-free constant)
 
 Usage:
-  python -m scripts.look_delta_reference                    # train + val
-  python -m scripts.look_delta_reference --max-episodes 2   # quick test
+  python -m scripts.analysis.look_delta_reference                    # train + val
+  python -m scripts.analysis.look_delta_reference --max-episodes 2   # quick test
 """
 import argparse
 import json
@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 
 from models import data, metrics
-from scripts.look_state_delta import STAR_IL, state_deltas
+from scripts.analysis.look_state_delta import STAR_IL, state_deltas
 
 E7_RUN = Path("outputs/star-il-simplecnn-latent512-canonq-delta-seed0")
 

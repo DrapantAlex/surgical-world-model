@@ -19,9 +19,9 @@ Outputs (outputs/analysis/standstill/):
   standstill_vs_h_<split>.png      error vs h, position and rotation side by side
 
 Usage:
-  python -m scripts.look_standstill_baseline                    # train
-  python -m scripts.look_standstill_baseline --split val        # same frames as E1/E2 val
-  python -m scripts.look_standstill_baseline --max-episodes 2   # quick test
+  python -m scripts.analysis.look_standstill_baseline                    # train
+  python -m scripts.analysis.look_standstill_baseline --split val        # same frames as E1/E2 val
+  python -m scripts.analysis.look_standstill_baseline --max-episodes 2   # quick test
 """
 import argparse
 from pathlib import Path

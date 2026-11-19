@@ -12,8 +12,8 @@ Result (2026-11-16), deterministic smokes (STAR-IL trimmed, 2 episodes, --chunk 
   reshuffle, so normal epochs use shuffles #1, #3, #5...; .repeat() uses #1, #2, #3...
   -> config.json "shuffle_order": "keras_epochs" / "repeat".
 
-  python -m scripts.check_val_every_weights <train args incl. --deterministic>   # one run
-  python -m scripts.check_val_every_weights compare <run with --val-every> <normal run>
+  python -m scripts.analysis.check_val_every_weights <train args incl. --deterministic>   # one run
+  python -m scripts.analysis.check_val_every_weights compare <run with --val-every> <normal run>
 """
 import sys
 from pathlib import Path

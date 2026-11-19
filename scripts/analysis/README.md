@@ -1,0 +1,47 @@
+# Analysis scripts
+
+Inspection and check scripts: they measure or verify something, but never train a model
+for the thesis. Run them from the repo root:
+
+```bash
+python -m scripts.analysis.<name> [args]
+```
+
+Moved here from `scripts/` on 2026-11-19; diary entries before that date use the old paths
+(`scripts/<name>.py`). "Supports" = the diary entry (or decision record) that reports the result.
+
+## Checks (`check_*`): does the code or the data do what I think?
+
+| Script | What it does | Supports |
+|---|---|---|
+| `check_camera_duplicates.py` | Are the left and right endoscope videos identical, per episode? | diary 10-12, 10-15 (left camera only) |
+| `check_data_full.py` | Frames, episodes, pairs and RAM of the tissue-lift train and val splits | — (tissue lift, before the frame cache) |
+| `check_model.py` | One batch of one episode through the model: shape check, no training | — (sanity tool) |
+| `check_orientation_error.py` | Actor error in mm and degrees per run (`check_orientation_error.json`) | decision 10-20; `experiment-comparison.md` §2, §6 (E1, E2, E6, E7) |
+| `check_quaternion_sign.py` | Is the action quaternion sign consistent across episodes? | decision 10-20 → `--canonical-quaternion` |
+| `check_repeat_batches.py` | `--val-every`: does `.repeat()` give the same batches as plain passes? | diary 11-16 |
+| `check_val_every_weights.py` | `--val-every`: weights bitwise identical to a normal run after epoch 1? | diary 11-16 |
+| `check_wm_off_gradient.py` | E6: with both WM weights at 0, no gradient reaches the encoder from the WM heads | decision 10-20 (E6) |
+
+## Inspections (`look_*`): what do the data or the runs show?
+
+| Script | What it does | Supports |
+|---|---|---|
+| `look_chunk_baselines.py` | E8: no-learning chunk predictors on val, before training | diary 10-29, E8 decision (not cited by name) |
+| `look_delta_predictability.py` | E7 D2: can the one-frame state change be predicted without the image? | diary 10-29; `experiment-comparison.md` §5 |
+| `look_delta_reference.py` | E7 D1: reference losses of the Δ head on train and val | diary 10-29 |
+| `look_endo360.py` | endo360 checks 1–3: glitches, sample-and-hold, share of the error | diary 11-17 |
+| `look_frame_difference.py` | From which gap k does frame t − k clearly differ from frame t? | — (output in `outputs/analysis/frame_difference/`) |
+| `look_standstill_baseline.py` | Stand-still error of a(t) vs a(t+h), h = 1..60 | diary 10-23; `experiment-comparison.md` |
+| `look_state_delta.py` | E7: size of the one-frame state change per dimension | diary 10-28 |
+| `look_state_groups.py` | KUKA / endo360 state curves of finished runs, from `history.csv` | — (commit `6eabc07`, 11-18; for runs before the in-training group logs) |
+| `look_static_vs_moving.py` | E1 / E2 / E6 errors split by phase and speed | diary 10-27 |
+| `look_tool_projection.py` | Projects the commanded tool position into the image; exports the keep ranges | diary 11-12; `configs/keep_ranges/README.md` |
+
+## Shared code
+
+Some scripts import from others; move or rename them together:
+`look_state_delta` → `look_chunk_baselines`, `look_delta_reference`, `look_delta_predictability`;
+`look_delta_reference` → `look_delta_predictability`;
+`look_standstill_baseline` → `look_frame_difference`, `look_static_vs_moving`;
+`check_quaternion_sign` → `check_orientation_error` → `look_static_vs_moving`, `scripts/train_state_only.py`.

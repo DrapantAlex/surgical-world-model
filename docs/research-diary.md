@@ -1067,3 +1067,9 @@ K = 1 is run 1a-val500 (checks every 500 batches, the same batch counts read off
 - [ ] Look at the glitch frame strips at full size.
 - [ ] Ask Michael: keep, balance or exclude endo360 in the WM state target? Repair the glitches? 1c as planned, or history earlier?
 - [ ] Decide whether to commit `scripts/look_endo360.py` as the evidence for the checks.
+
+---
+
+## 2026-11-19
+
+- Analysis scripts moved to `scripts/analysis/`; commands in earlier entries refer to the old paths.

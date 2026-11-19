@@ -6,7 +6,7 @@ group's val MSE = the mean of its per-dimension columns (val_next_state_output_m
 divided by the group's copy_state line (the mean of the per-dim _copy values in config.json).
 The constant-velocity line comes from the run's val_metrics_reeval.json (--eval-only).
 
-  python -m scripts.look_state_groups <run> [<run> ...]    # first run solid, second dashed, ...
+  python -m scripts.analysis.look_state_groups <run> [<run> ...]    # first run solid, second dashed, ...
 """
 import json
 import sys

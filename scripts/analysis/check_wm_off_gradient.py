@@ -13,7 +13,7 @@ differ (control: the check is able to fail).
 
 Labels/statistics come from a finished canonical run (no full-split loading).
 
-  python -m scripts.check_wm_off_gradient
+  python -m scripts.analysis.check_wm_off_gradient
 """
 from pathlib import Path
 

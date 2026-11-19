@@ -1,4 +1,4 @@
-# scripts/check_data_full.py
+# scripts/analysis/check_data_full.py
 import numpy as np
 from models import data
 

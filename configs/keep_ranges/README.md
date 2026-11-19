@@ -39,12 +39,12 @@ are trimmed).
 **Validation:**
 - the projected point sits on (slightly above) the tool tip;
 - the projected entry/exit frames match hand annotations of the video within a few frames
-  (`scripts/look_tool_projection.py --strips` and `--summarise`).
+  (`scripts/analysis/look_tool_projection.py --strips` and `--summarise`).
 
 **Command (regenerates this file exactly):**
 
 ```bash
-python -m scripts.look_tool_projection --all --export-keep-ranges configs/keep_ranges/star_il_tool_visible.csv
+python -m scripts.analysis.look_tool_projection --all --export-keep-ranges configs/keep_ranges/star_il_tool_visible.csv
 ```
 
 **Created:** 2026-11-12 (code at commit `b04d90e` + the uncommitted `--all` / `--export-keep-ranges` changes).

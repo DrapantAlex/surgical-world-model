@@ -5,9 +5,9 @@ Question: are E1 (image + WM), E2 (state-only) and E6 (image, WM off) wrong in t
 same way on frames where the robot stands still and on frames where it moves?
 
 Inference only, from each run's best.weights.h5 (nothing is trained or saved into the run).
-  - static / moving: the label of scripts/look_standstill_baseline.py, unchanged
+  - static / moving: the label of scripts/analysis/look_standstill_baseline.py, unchanged
     (a(t) -> a(t+1) below STATIC_MM and STATIC_DEG, raw actions, float64)
-  - errors: as in scripts/check_orientation_error.py (position mm, sign-invariant
+  - errors: as in scripts/analysis/check_orientation_error.py (position mm, sign-invariant
     rotation deg); the all-frames mean is checked against the run's saved
     check_orientation_error.json, so these are the numbers of the diary
   - moving frames are split into 3 equal-size speed bins (slow / medium / fast) by
@@ -19,8 +19,8 @@ Outputs (outputs/analysis/static_moving/):
   summary_<split>.csv    one row per group x phase (mean, std over seeds)
 
 Usage:
-  python -m scripts.look_static_vs_moving                    # val, E1 / E2 / E6
-  python -m scripts.look_static_vs_moving --max-episodes 2   # quick test
+  python -m scripts.analysis.look_static_vs_moving                    # val, E1 / E2 / E6
+  python -m scripts.analysis.look_static_vs_moving --max-episodes 2   # quick test
 """
 import argparse
 import json
@@ -31,8 +31,8 @@ import pandas as pd
 
 from models import data, metrics
 from models.state_only import build_state_only_actor
-from scripts.check_orientation_error import predict_actions
-from scripts.look_standstill_baseline import STATIC_DEG, STATIC_MM, errors_at_h, load_actions
+from scripts.analysis.check_orientation_error import predict_actions
+from scripts.analysis.look_standstill_baseline import STATIC_DEG, STATIC_MM, errors_at_h, load_actions
 from scripts.train import OUTPUTS, build_model, dataset_root, run_quat_ref
 
 OUT = Path("outputs/analysis/static_moving")

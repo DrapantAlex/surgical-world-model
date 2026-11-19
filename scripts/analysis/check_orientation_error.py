@@ -17,8 +17,8 @@ For the saved best weights of one run, on val and on a train subset
      is wrong = how much orientation error would remain without the sign problem
 
 Usage:
-  python -m scripts.check_orientation_error
-  python -m scripts.check_orientation_error --train-episodes 2 --val-episodes 2   # quick test
+  python -m scripts.analysis.check_orientation_error
+  python -m scripts.analysis.check_orientation_error --train-episodes 2 --val-episodes 2   # quick test
 """
 import argparse
 import json
@@ -27,7 +27,7 @@ import numpy as np
 
 from models import data, metrics
 from models.pipeline import make_dataset
-from scripts.check_quaternion_sign import average_quaternion, unit
+from scripts.analysis.check_quaternion_sign import average_quaternion, unit
 from scripts.train import OUTPUTS, build_model, dataset_root, run_quat_ref
 
 POS = slice(0, 3)   # STAR-IL action: [x y z | qx qy qz qw]

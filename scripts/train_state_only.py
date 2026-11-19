@@ -4,7 +4,7 @@ Everything except the model is the same as scripts/train.py: train-only normalis
 statistics, optional canonical quaternions, the same episodes and pairs (episodes without
 video are dropped here too), Huber loss, Adam, early stopping on the val action loss.
 Frames are never loaded. At the end the best weights are measured with
-scripts/check_orientation_error.py (check_orientation_error.json, read by compare_runs.py).
+scripts/analysis/check_orientation_error.py (check_orientation_error.json, read by compare_runs.py).
 
   python -m scripts.train_state_only --run-name smoke-state-only --max-episodes 2 --epochs 2 \
       --dataset-root data/open_h/Surgical/jhu/imerse/star_il/star_il --canonical-quaternion --wandb-mode offline
@@ -21,7 +21,7 @@ from tensorflow import keras
 
 from models import data, metrics
 from models.state_only import HIDDEN, build_state_only_actor
-from scripts.check_orientation_error import check_run
+from scripts.analysis.check_orientation_error import check_run
 from scripts.train import (OUTPUTS, WANDB_PROJECT, EpochTimer, WandbLogger, episodes_for,
                            git_commit, save_json)
 

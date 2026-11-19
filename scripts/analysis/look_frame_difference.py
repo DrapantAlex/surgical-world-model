@@ -26,8 +26,8 @@ of look_standstill_baseline). A pair (t-k, t) is
 Output: outputs/analysis/frame_difference/frame_difference_val_<n>ep.csv (n = episodes)
 
 Usage:
-  python -m scripts.look_frame_difference --max-episodes 2    # quick test
-  python -m scripts.look_frame_difference                     # 50 episodes
+  python -m scripts.analysis.look_frame_difference --max-episodes 2    # quick test
+  python -m scripts.analysis.look_frame_difference                     # 50 episodes
 """
 import argparse
 from pathlib import Path
@@ -36,7 +36,7 @@ import numpy as np
 import pandas as pd
 
 from models import data, metrics
-from scripts.look_standstill_baseline import POS, QUAT, STATIC_MM, STATIC_DEG, STAR_IL
+from scripts.analysis.look_standstill_baseline import POS, QUAT, STATIC_MM, STATIC_DEG, STAR_IL
 
 OUT = Path("outputs/analysis/frame_difference")
 GAPS = (1, 2, 4, 8, 16)   # the gaps k between the two frames

@@ -52,7 +52,7 @@ DELTA_FLOOR_C = 0.25   # --state-delta: scale = max(median|Δ|, DELTA_FLOOR_C * 
 CHUNK_FLOOR_C = 0.25   # --chunk: scale = max(median, CHUNK_FLOOR_C * mean) of each group's offset norm
 GLITCH_G = 5           # glitch report (evaluation only): a one-frame jump > GLITCH_G x the train p99
                        # of |Δ| of that dim that comes back (glitch_frames); STAR-IL endo360: the
-                       # 0.11-0.126 rad spikes of scripts/look_endo360.py
+                       # 0.11-0.126 rad spikes of scripts/analysis/look_endo360.py
 OUTPUTS, LOGS = Path("outputs"), Path("logs")
 
 
@@ -577,7 +577,7 @@ def train(args):
     # shuffle order: every new iterator draws the next reshuffle. Normal epochs: Keras 3.15
     # creates two iterators between epochs and uses only the second (shuffles #1, #3, #5...,
     # "keras_epochs"); .repeat() uses every one (#1, #2, #3..., "repeat"). So epoch 1 is
-    # identical to old runs (checked bitwise: scripts/check_val_every_weights.py), later
+    # identical to old runs (checked bitwise: scripts/analysis/check_val_every_weights.py), later
     # epochs see a different but equally random order.
     train_ds = make_dataset(train_split, args.batch_size, shuffle=True, seed=args.seed,
                             repeat=bool(args.val_every))

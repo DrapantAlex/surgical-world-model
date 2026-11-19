@@ -22,8 +22,8 @@ so f = 0 is recomputed on exactly these pairs).
 Outputs: outputs/analysis/state_delta/predictability.csv
 
 Usage:
-  python -m scripts.look_delta_predictability                    # train + val
-  python -m scripts.look_delta_predictability --max-episodes 2   # quick test
+  python -m scripts.analysis.look_delta_predictability                    # train + val
+  python -m scripts.analysis.look_delta_predictability --max-episodes 2   # quick test
 """
 import argparse
 import json
@@ -33,8 +33,8 @@ import numpy as np
 import pandas as pd
 
 from models import data, metrics
-from scripts.look_delta_reference import E7_RUN
-from scripts.look_state_delta import STAR_IL
+from scripts.analysis.look_delta_reference import E7_RUN
+from scripts.analysis.look_state_delta import STAR_IL
 
 OUT = Path("outputs/analysis/state_delta")
 FEATURE_SETS = ("s,a", "s,a,da", "s,a,ds")

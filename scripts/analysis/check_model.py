@@ -1,6 +1,6 @@
 """Shape check: one batch of one episode through the model (no training).
 
-  python -m scripts.check_model [--dataset-root ...] [--episode 0]
+  python -m scripts.analysis.check_model [--dataset-root ...] [--episode 0]
 """
 import argparse
 from pathlib import Path

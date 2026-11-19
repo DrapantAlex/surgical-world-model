@@ -57,14 +57,14 @@ the frame where the tool TIP really enters / leaves the view?
   last_visible as the keep-ranges file for training (data.load_keep_ranges).
 
 Usage:
-  python -m scripts.look_tool_projection --episodes 0            # quick test, 1 episode
-  python -m scripts.look_tool_projection                         # 3 train episodes
-  python -m scripts.look_tool_projection --lag-frames 3 --distortion
-  python -m scripts.look_tool_projection --strips                # 8 episodes, lag 0
-  python -m scripts.look_tool_projection --summarise outputs/analysis/tool_projection/timing_validation.csv --lag-frames 3
-  python -m scripts.look_tool_projection --all --episodes 0 409  # quick test (1 train, 1 val)
-  python -m scripts.look_tool_projection --all                   # every train + val episode
-  python -m scripts.look_tool_projection --all --export-keep-ranges configs/keep_ranges/star_il_tool_visible.csv
+  python -m scripts.analysis.look_tool_projection --episodes 0            # quick test, 1 episode
+  python -m scripts.analysis.look_tool_projection                         # 3 train episodes
+  python -m scripts.analysis.look_tool_projection --lag-frames 3 --distortion
+  python -m scripts.analysis.look_tool_projection --strips                # 8 episodes, lag 0
+  python -m scripts.analysis.look_tool_projection --summarise outputs/analysis/tool_projection/timing_validation.csv --lag-frames 3
+  python -m scripts.analysis.look_tool_projection --all --episodes 0 409  # quick test (1 train, 1 val)
+  python -m scripts.analysis.look_tool_projection --all                   # every train + val episode
+  python -m scripts.analysis.look_tool_projection --all --export-keep-ranges configs/keep_ranges/star_il_tool_visible.csv
 """
 import argparse
 from pathlib import Path

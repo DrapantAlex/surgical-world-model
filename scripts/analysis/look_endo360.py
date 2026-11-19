@@ -15,7 +15,7 @@ Pair sets per episode (t = first frame of the pair (t, t+1)):
 Only check 1d decodes video (7 frames around each of the 3 largest jumps).
 
 Usage:
-  python -m scripts.look_endo360
+  python -m scripts.analysis.look_endo360
 """
 import json
 from pathlib import Path

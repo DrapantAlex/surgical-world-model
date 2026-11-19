@@ -16,8 +16,8 @@ quaternions, norm stats and option-C chunk scale. Checks:
 Outputs: outputs/analysis/chunk/baselines_val.csv (one row per predictor x step)
 
 Usage:
-  python -m scripts.look_chunk_baselines                    # val
-  python -m scripts.look_chunk_baselines --max-episodes 2   # quick test
+  python -m scripts.analysis.look_chunk_baselines                    # val
+  python -m scripts.analysis.look_chunk_baselines --max-episodes 2   # quick test
 """
 import argparse
 from pathlib import Path
@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 
 from models import data, metrics
-from scripts.look_state_delta import STAR_IL
+from scripts.analysis.look_state_delta import STAR_IL
 
 OUT = Path("outputs/analysis/chunk")
 DIARY_STANDSTILL = {1: (0.42, 0.09), 5: (1.92, 0.36), 10: (3.53, 0.67)}   # h: (mm, deg), val mean

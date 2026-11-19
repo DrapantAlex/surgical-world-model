@@ -10,8 +10,8 @@ endoscope video dropped (same pairs as train.py). STAR-IL state has no quaternio
 so --canonical-quaternion would not change it.
 
 Usage:
-  python -m scripts.look_state_delta                    # train split (tables only)
-  python -m scripts.look_state_delta --max-episodes 2   # quick test
+  python -m scripts.analysis.look_state_delta                    # train split (tables only)
+  python -m scripts.analysis.look_state_delta --max-episodes 2   # quick test
 """
 import argparse
 from pathlib import Path

@@ -7,7 +7,7 @@ Normalised MSE is never compared here, because it depends on the label
 convention (--canonical-quaternion changes the label std).
 
 Reads, for every run, outputs/<run>/config.json and the output of
-scripts/check_orientation_error.py (outputs/<run>/check_orientation_error.json).
+scripts/analysis/check_orientation_error.py (outputs/<run>/check_orientation_error.json).
 
   1. Per run: rotation error (median / mean / p90) on the train subset and val,
      position error, val wrong-sign % and |q_pred| < 0.7 %, best epoch, train/val gap,
@@ -65,7 +65,7 @@ def val_episodes(check):
     eps = sorted(check["per_episode"]["val"].items(), key=lambda kv: int(kv[0]))
     if any("n_pairs" not in v for _, v in eps):
         raise SystemExit("check_orientation_error.json has no per-episode n_pairs: re-run "
-                         "scripts.check_orientation_error for this run")
+                         "scripts.analysis.check_orientation_error for this run")
     ids = np.array([int(e) for e, _ in eps])
     n = np.array([v["n_pairs"] for _, v in eps], float)
     err = np.array([v["rot_err_deg"] for _, v in eps])
@@ -157,7 +157,7 @@ def seed_averaged(runs, key):
     for r in runs:
         eps = sorted(load_run(r)[1]["per_episode"]["val"].items(), key=lambda kv: int(kv[0]))
         if any(key not in v for _, v in eps):
-            raise SystemExit(f"{r}: no per-episode {key!r}: re-run scripts.check_orientation_error")
+            raise SystemExit(f"{r}: no per-episode {key!r}: re-run scripts.analysis.check_orientation_error")
         per_run.append((np.array([int(e) for e, _ in eps]),
                         np.array([v["n_pairs"] for _, v in eps], float),
                         np.array([v[key] for _, v in eps])))

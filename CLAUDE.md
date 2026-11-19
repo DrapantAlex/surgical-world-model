@@ -42,7 +42,7 @@ python -m scripts.train --dataset-root data/open_h/Surgical/jhu/imerse/star_il/s
 python -m scripts.train_overfit                        # overfit one episode (pipeline sanity check)
 ```
 
-The repo has no test suite and no linter. To validate a change, run a `--max-episodes` smoke run. The `scripts/check_*.py` and `scripts/look_*.py` files are throwaway inspection scripts.
+The repo has no test suite and no linter. To validate a change, run a `--max-episodes` smoke run. The `scripts/analysis/check_*.py` and `scripts/analysis/look_*.py` files are inspection scripts (run as `python -m scripts.analysis.<name>`), listed with their diary entries in `scripts/analysis/README.md`.
 
 ## Architecture
 

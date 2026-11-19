@@ -6,9 +6,9 @@ Result (2026-11-16): IDENTICAL, 64 vs 64 batches over 2 passes, last batch of 11
 pass, pass 2 reshuffled.
 Caveat: plain passes are NOT what Keras fit does. Keras 3.15 discards every second
 iterator between epochs (shuffles #1, #3, ...), so with Keras only epoch 1 matches:
-see scripts/check_val_every_weights.py.
+see scripts/analysis/check_val_every_weights.py.
 
-  python -m scripts.check_repeat_batches
+  python -m scripts.analysis.check_repeat_batches
 """
 import numpy as np
 import tensorflow as tf

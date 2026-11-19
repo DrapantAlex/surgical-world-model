@@ -18,9 +18,9 @@ Four pieces of evidence, all from the parquet tables (no videos):
                             from the reference rotation
 
 Usage:
-  python -m scripts.check_quaternion_sign
-  python -m scripts.check_quaternion_sign --max-episodes 50
-  python -m scripts.check_quaternion_sign --canonical-quaternion --split val
+  python -m scripts.analysis.check_quaternion_sign
+  python -m scripts.analysis.check_quaternion_sign --max-episodes 50
+  python -m scripts.analysis.check_quaternion_sign --canonical-quaternion --split val
 """
 import argparse
 from pathlib import Path
