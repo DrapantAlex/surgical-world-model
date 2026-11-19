@@ -33,7 +33,7 @@ import json
 
 import numpy as np
 
-from scripts.train import OUTPUTS
+from models.run_config import OUTPUTS
 
 B = 10_000            # bootstrap resamples
 BOOT_SEED = 0

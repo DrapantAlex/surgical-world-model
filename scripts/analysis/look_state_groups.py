@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 from models import data
-from scripts.train import OUTPUTS, metric_name
+from models.run_config import OUTPUTS, metric_name
 
 OUT = Path("outputs/analysis/state_groups")
 PANELS = {"kuka_joint_pos": ("KUKA arm (7 joints)", "#2a78d6"),

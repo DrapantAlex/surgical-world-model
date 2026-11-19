@@ -75,14 +75,21 @@ The repo has no test suite and no linter. To validate a change, run a `--max-epi
 - The core metrics (`action_mse`, `action_huber`, `next_state_mse`, `next_image_mse`) are in normalised units and exist for every dataset.
 - The physical `extra/` metrics (mm, rotation, jaw per arm) exist only for tissue lift, whose 16-D layout `[x y z | quat | jaw] × 2 arms` is known. The check for it is the dataset folder name.
 
+**Rebuilding a run (`models/run_config.py`)**
+- `build_model(cfg, stats)` builds and compiles the model from a run's saved `config.json` and `norm_stats.json`. Training, `--eval-only`, and the analysis scripts that reload saved weights all use it.
+- The config readers there (`dataset_root`, `loss_weights`, `delta_factor`, `run_quat_ref`, `run_keep_ranges`, …) give older runs the defaults they were trained with.
+- `OUTPUTS` (the `outputs/` folder) lives here too.
+
 **Training (`scripts/train.py`)**
-- Settings that are fixed on purpose live at the top of the file rather than as CLI flags: the loss weights (action 1.0, state 1.0, image 0.1), `MONITOR = val_action_output_loss` for checkpointing and early stopping, and the W&B project.
+- Settings that are fixed on purpose are constants rather than CLI flags:
+  - the loss weights (action 1.0, state 1.0, image 0.1) are `LOSS_WEIGHTS` in `models/run_config.py`, because rebuilding a run needs them;
+  - `MONITOR = val_action_output_loss` (checkpointing and early stopping) and the W&B project are at the top of `scripts/train.py`.
 - Each run writes to `outputs/<run>/`: `config.json` (including git commit, params, and episodes), `norm_stats.json`, `best.weights.h5` (weights only), `history.csv`, and `val_metrics.json`.
 - TensorBoard logs go to `logs/<run>/`, and W&B is also enabled.
 - Full runs (no `--max-episodes`) append a row to `outputs/results.csv`. Smoke runs do not.
 - The script refuses to reuse an existing run name.
 - `--eval-only` rebuilds the model from the saved config and stats.
-- When changing config keys or metric names, keep older runs loadable. For example, runs without a `dataset_root` key default to tissue lift.
+- When changing config keys or metric names, keep older runs loadable. For example, runs without a `dataset_root` key default to tissue lift (`dataset_root` in `models/run_config.py`).
 
 ## Conventions
 

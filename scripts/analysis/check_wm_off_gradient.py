@@ -22,7 +22,7 @@ import tensorflow as tf
 from tensorflow import keras
 
 from models import data
-from scripts.train import OUTPUTS, build_model
+from models.run_config import OUTPUTS, build_model
 
 REF_RUN = "star-il-simplecnn-latent512-canonq-seed0"
 ROOT = Path("data/open_h/Surgical/jhu/imerse/star_il/star_il")

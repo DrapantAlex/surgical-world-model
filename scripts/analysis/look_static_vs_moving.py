@@ -33,7 +33,7 @@ from models import data, metrics
 from models.state_only import build_state_only_actor
 from scripts.analysis.check_orientation_error import predict_actions
 from scripts.analysis.look_standstill_baseline import STATIC_DEG, STATIC_MM, errors_at_h, load_actions
-from scripts.train import OUTPUTS, build_model, dataset_root, run_quat_ref
+from models.run_config import OUTPUTS, build_model, dataset_root, run_quat_ref
 
 OUT = Path("outputs/analysis/static_moving")
 POS, QUAT = slice(0, 3), slice(3, 7)   # STAR-IL action: [x y z | qx qy qz qw]

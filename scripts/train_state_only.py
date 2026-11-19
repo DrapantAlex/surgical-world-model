@@ -22,8 +22,8 @@ from tensorflow import keras
 from models import data, metrics
 from models.state_only import HIDDEN, build_state_only_actor
 from scripts.analysis.check_orientation_error import check_run
-from scripts.train import (OUTPUTS, WANDB_PROJECT, EpochTimer, WandbLogger, episodes_for,
-                           git_commit, save_json)
+from models.run_config import OUTPUTS, episodes_for
+from scripts.train import WANDB_PROJECT, EpochTimer, WandbLogger, git_commit, save_json
 
 MONITOR = "val_loss"   # one output only: the loss IS the action loss
 
