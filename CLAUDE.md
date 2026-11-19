@@ -46,6 +46,8 @@ The repo has no test suite and no linter. To validate a change, run a `--max-epi
 
 ## Architecture
 
+`models/` holds the library code, one module per concern; `scripts/` holds the entry points. `README.md` has the folder tree.
+
 **Data (`models/data.py`)**
 - The default dataset is `srt_tissue_lift`. Every entry point accepts `--dataset-root`, and the code must stay dataset-agnostic: read paths, splits (`"train": "0:180"`), and state/action dims from `meta/info.json` and `episodes.jsonl`. Never hard-code them.
 - Only the left endoscope camera is used, because the right video is an exact copy.
@@ -63,27 +65,34 @@ The repo has no test suite and no linter. To validate a change, run a `--max-epi
 
 **Pipeline (`models/pipeline.py`)**: `make_dataset` wraps `get_pairs` in `tf.numpy_function` over shuffled, batched `pair_index`.
 
-**Model (`models/simple_world_model/swm.py`, `models/encoders.py`)**
+**Model (`models/simple_world_model/swm.py`, `models/encoders.py`, `models/state_only.py`)**
 - The encoder is selected by name: `simple_cnn` (the original 4 convs) or a Keras Applications backbone.
 - To add a backbone, add one line to `APPLICATIONS`. Backbone-specific preprocessing goes inside the encoder as layers, so the data pipeline stays in [0, 1].
 - In backbones, BatchNorm is always frozen and runs in inference mode.
 - `latent_dim=512` adds a bottleneck before the image decoder, giving about 72M parameters in total. `latent_dim=None` is the original decoder, with about 2.5B parameters (roughly 40 GB of GPU memory).
 - The decoder starts at img/16 and upsamples by 2 four times.
+- The experiment variants are arguments of `build_actor_world_model`, each marked `NEW (<experiment>):` in the code: `delta_factor` (E7), `action_chunk` (E8), `state_skip` (1a), `state_layers` (1b), `wm_mixer_blocks` (1c). Their defaults give the original model.
+- `models/state_only.py` is the state-only actor of E2 (no image), trained by `scripts/train_state_only.py`.
 
-**Metrics (`models/metrics.py`)**
-- `scripts/baselines.py` and `scripts/train.py` both use these functions, so baselines and models are always measured the same way.
+**Metrics and reference lines (`models/metrics.py`, `models/references.py`)**
+- `scripts/baselines.py` and `scripts/train.py` both use the metrics functions, so baselines and models are always measured the same way.
 - The core metrics (`action_mse`, `action_huber`, `next_state_mse`, `next_image_mse`) are in normalised units and exist for every dataset.
 - The physical `extra/` metrics (mm, rotation, jaw per arm) exist only for tissue lift, whose 16-D layout `[x y z | quat | jaw] × 2 arms` is known. The check for it is the dataset folder name.
 - The no-learning reference lines used during training and evaluation are in `models/references.py`: copy_state (per dim), copy_frame, constant velocity, stand-still and train-mean Huber, and the glitch rule (`GLITCH_G`) with the per-group state report.
-- The final evaluation of the best weights (`evaluate`), the E8 chunk baselines, and the comparison table next to the `scripts/baselines.py` results are in `models/evaluation.py`.
+
+**Evaluation (`models/evaluation.py`)**: the final evaluation of the best weights (`evaluate`), the E8 chunk baselines, and the comparison table next to the `scripts/baselines.py` results, joined only when the dataset, quaternion convention and keep ranges match.
 
 **Rebuilding a run (`models/run_config.py`)**
-- `build_model(cfg, stats)` builds and compiles the model from a run's saved `config.json` and `norm_stats.json`. Training, `--eval-only`, and the analysis scripts that reload saved weights all use it.
-- The config readers there (`dataset_root`, `loss_weights`, `delta_factor`, `run_quat_ref`, `run_keep_ranges`, …) give older runs the defaults they were trained with.
+- `build_model(cfg, stats)` builds and compiles the model from a run's saved `config.json` and `norm_stats.json`. Training, `--eval-only`, and the analysis scripts that reload saved weights all use it; pass the run's own `stats`.
+- The config readers there (`dataset_root`, `loss_weights`, `delta_factor`, `run_quat_ref`, `run_keep_ranges`, …) give older runs the defaults they were trained with. `dataset_root` also turns an absolute path inside the repo into the repo-relative one.
 - `OUTPUTS` (the `outputs/` folder) lives here too, with `git_commit` and `save_json`, which write a run's records.
+
+**Callbacks and visualisation (`models/callbacks.py`, `models/visualization.py`)**
 - The Keras callbacks that add values to the logs or send them to W&B are in `models/callbacks.py`. `CheckMonitor`, which needs `MONITOR`, stays in `scripts/train.py`.
+- `models/visualization.py` draws the GT/PRED timeline for TensorBoard and W&B.
 
 **Training (`scripts/train.py`)**
+- It holds the command line, `train()`, `eval_only()`, two small helpers (`checks`, `log_tensorboard`), and the two pieces that depend on training choices (`CheckMonitor`, `timeline_callback`). Everything else it imports from `models/`.
 - Settings that are fixed on purpose are constants rather than CLI flags:
   - the loss weights (action 1.0, state 1.0, image 0.1) are `LOSS_WEIGHTS` in `models/run_config.py`, because rebuilding a run needs them;
   - `MONITOR = val_action_output_loss` (checkpointing and early stopping) and the W&B project are at the top of `scripts/train.py`.
@@ -93,6 +102,10 @@ The repo has no test suite and no linter. To validate a change, run a `--max-epi
 - The script refuses to reuse an existing run name.
 - `--eval-only` rebuilds the model from the saved config and stats.
 - When changing config keys or metric names, keep older runs loadable. For example, runs without a `dataset_root` key default to tissue lift (`dataset_root` in `models/run_config.py`).
+
+**Other scripts**
+- `scripts/baselines.py` (trivial predictors), `scripts/train_state_only.py` (E2), `scripts/train_overfit.py` (overfit one episode) and `scripts/compare_runs.py` (seed groups, bootstrap CIs, the paired test).
+- `scripts/analysis/`: checks (`check_*`), inspections (`look_*`) and figures (`plot_*`). They never train a thesis model. Each is listed with the diary entry it supports in `scripts/analysis/README.md`.
 
 ## Conventions
 
