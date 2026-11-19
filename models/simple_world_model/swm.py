@@ -73,6 +73,7 @@ def build_actor_world_model(state_dim, action_dim, img_h=IMG_H, img_w=IMG_W, lan
                              f"{feat_h} x {feat_w} x C map")
         C = encoded_img.shape[-1] // n_pos
         x = layers.Reshape((feat_h, feat_w, C), name="wm_map")(encoded_img)
+        
         for i in range(wm_mixer_blocks):
             h = layers.DepthwiseConv2D(
                 WM_MIXER_KERNEL, padding="same", activation="relu",
@@ -83,6 +84,7 @@ def build_actor_world_model(state_dim, action_dim, img_h=IMG_H, img_w=IMG_W, lan
                 name=f"wm_mixer_pw_{i}")(h)                                   # 2. combine channels, starts at 0
             x = layers.Add(name=f"wm_mixer_add_{i}")([x, h])                  # 3. residual: x + correction
         wm_img = layers.Flatten(name="wm_flat")(x)
+    
     wm_features = layers.Concatenate()(
         [wm_img, state_input, language_input, action_input])   # 1c: wm_img (actor: encoded_img)
 
