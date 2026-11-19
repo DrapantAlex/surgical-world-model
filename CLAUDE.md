@@ -75,6 +75,7 @@ The repo has no test suite and no linter. To validate a change, run a `--max-epi
 - The core metrics (`action_mse`, `action_huber`, `next_state_mse`, `next_image_mse`) are in normalised units and exist for every dataset.
 - The physical `extra/` metrics (mm, rotation, jaw per arm) exist only for tissue lift, whose 16-D layout `[x y z | quat | jaw] × 2 arms` is known. The check for it is the dataset folder name.
 - The no-learning reference lines used during training and evaluation are in `models/references.py`: copy_state (per dim), copy_frame, constant velocity, stand-still and train-mean Huber, and the glitch rule (`GLITCH_G`) with the per-group state report.
+- The final evaluation of the best weights (`evaluate`), the E8 chunk baselines, and the comparison table next to the `scripts/baselines.py` results are in `models/evaluation.py`.
 
 **Rebuilding a run (`models/run_config.py`)**
 - `build_model(cfg, stats)` builds and compiles the model from a run's saved `config.json` and `norm_stats.json`. Training, `--eval-only`, and the analysis scripts that reload saved weights all use it.

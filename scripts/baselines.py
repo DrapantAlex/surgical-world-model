@@ -39,7 +39,7 @@ def parse_args():
 def main():
     args = parse_args()
     smoke = args.max_episodes is not None
-    # the same folder name train.py's baselines_json() looks for
+    # the same folder name models/evaluation.py's baselines_json() looks for
     default = ("outputs/baselines" + ("_canonical" if args.canonical_quaternion else "")
                + ("_trimmed" if args.keep_ranges else ""))
     out = Path(args.out or ("outputs/baselines_smoke" if smoke else default))
