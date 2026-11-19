@@ -24,7 +24,6 @@ The test split is never loaded.
 import argparse
 import json
 import shutil
-import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -35,11 +34,12 @@ import wandb
 from tensorflow import keras
 
 from models import data, metrics
+from models.callbacks import ConstantLogs, EpochTimer, StateGroupLogs, TrainingProgress, WandbLogger
 from models.encoders import ENCODERS
 from models.pipeline import make_dataset
 from models.run_config import (LOSS_WEIGHTS, OUTPUTS, build_model, dataset_root, delta_factor,
-                               episodes_for, freeze_label, loss_weights, metric_name,
-                               run_keep_ranges, run_quat_ref)
+                               episodes_for, freeze_label, git_commit, loss_weights,
+                               metric_name, run_keep_ranges, run_quat_ref, save_json)
 from models.simple_world_model.swm import WM_MIXER_KERNEL
 from models.visualization import WorldModelTimelineCallback
 
@@ -319,19 +319,6 @@ def comparison_table(model_name, model_metrics, root, canonical=False, chunk_bas
             columns.update(baselines["results"])
     return metrics.format_table(columns)
 
-def git_commit():
-    try:
-        sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
-                             capture_output=True, text=True).stdout.strip()
-        dirty = subprocess.run(["git", "status", "--porcelain"],
-                               capture_output=True, text=True).stdout.strip()
-        return sha + ("+uncommitted" if dirty else "")
-    except OSError:
-        return "unknown"
-
-def save_json(obj, path):
-    Path(path).write_text(json.dumps(obj, indent=2))
-
 def log_tensorboard(val_metrics, log_dir, step):
     """Final metrics of the best weights, same names as results.csv ("extra/..." its own group)."""
     with tf.summary.create_file_writer(str(Path(log_dir) / "best_val")).as_default():
@@ -339,73 +326,12 @@ def log_tensorboard(val_metrics, log_dir, step):
             tf.summary.scalar(k, v, step=step)
 
 
-# --- C: callbacks ---
-class EpochTimer(keras.callbacks.Callback):
-    """Adds the duration of each epoch to the logs, so every later callback records it."""
-    def on_epoch_begin(self, epoch, logs=None):
-        self.t0 = time.time()
-
-    def on_epoch_end(self, epoch, logs=None):
-        if logs is not None:
-            logs["epoch_time_s"] = time.time() - self.t0
-
-class TrainingProgress(keras.callbacks.Callback):
-    """Adds the real x-axis to each check's logs: training batches seen so far and the
-    same in real epochs. One Keras "epoch" = one check = batches_per_check batches
-    (--val-every N: N; normal runs: one full epoch)."""
-    def __init__(self, batches_per_check, batches_per_epoch):
-        super().__init__()
-        self.batches_per_check, self.batches_per_epoch = batches_per_check, batches_per_epoch
-
-    def on_epoch_end(self, epoch, logs=None):
-        if logs is not None:
-            logs["batches_seen"] = (epoch + 1) * self.batches_per_check
-            logs["epochs_seen"] = logs["batches_seen"] / self.batches_per_epoch
-
+# --- C: callbacks that depend on training choices (the others: models/callbacks.py) ---
 class CheckMonitor(keras.callbacks.Callback):
     """Stops at once if Keras does not log MONITOR (loss names differ between versions)."""
     def on_epoch_end(self, epoch, logs=None):
         if epoch == 0 and MONITOR not in (logs or {}):
             raise KeyError(f"{MONITOR!r} is not in the Keras logs: {sorted(logs or {})}")
-
-class ConstantLogs(keras.callbacks.Callback):
-    """Adds fixed reference values (e.g. the f = 0 val loss) to every epoch's logs,
-    so they appear as flat lines next to the real curves (CSV, TensorBoard, W&B)."""
-    def __init__(self, values):
-        super().__init__()
-        self.values = values
-
-    def on_epoch_end(self, epoch, logs=None):
-        if logs is not None:
-            logs.update(self.values)
-
-class StateGroupLogs(keras.callbacks.Callback):
-    """Adds (val_)next_state_<group>_mse = the mean of the group's per-dimension metrics
-    (state_dim_metrics). Every per-dim metric averages over the same samples, so this is
-    exactly the group's MSE. groups: {group metric name: [dim metric names]}."""
-    def __init__(self, groups):
-        super().__init__()
-        self.groups = groups
-
-    def on_epoch_end(self, epoch, logs=None):
-        if logs is None:
-            return
-        for prefix in ("", "val_"):
-            for g, dims in self.groups.items():
-                keys = [f"{prefix}next_state_output_mse_{d}" for d in dims]
-                if all(k in logs for k in keys):
-                    logs[f"{prefix}next_state_{g}_mse"] = float(np.mean([logs[k] for k in keys]))
-
-class WandbLogger(keras.callbacks.Callback):
-    """Every log value except the per-dimension state columns and their _copy lines
-    (kept in history.csv and TensorBoard; W&B gets the per-group columns instead)."""
-    def __init__(self, run):
-        super().__init__()
-        self.run = run
-
-    def on_epoch_end(self, epoch, logs=None):
-        self.run.log({k: float(v) for k, v in (logs or {}).items()
-                      if "next_state_output_mse_" not in k}, step=epoch)
 
 def timeline_callback(val, run, log_dir, every, root):
     """The existing GT/PRED timeline, on the first validation episode (8 frames, 10 apart)."""

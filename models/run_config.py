@@ -1,10 +1,14 @@
-"""How to rebuild a finished run from its folder outputs/<run>/: the backward-compatible
-readers of config.json (older runs lack newer keys and get the value they were trained
-with), the run's own files (quaternion reference, keep ranges) and build_model.
-Shared by scripts/train.py (training and --eval-only) and the analysis scripts that reload
-saved weights. Moved here from scripts/train.py on 2026-11-19 (refactor step 3), unchanged.
+"""Everything about a run folder outputs/<run>/: rebuilding a run, and writing its records.
+Rebuilding: the backward-compatible readers of config.json (older runs lack newer keys and
+get the value they were trained with), the run's own files (quaternion reference, keep
+ranges) and build_model. Records: git_commit (saved in config.json) and save_json.
+Shared by scripts/train.py (training and --eval-only), scripts/train_state_only.py and the
+analysis scripts that reload saved weights. Moved here from scripts/train.py on 2026-11-19
+(refactor steps 3 and 4a), unchanged.
 """
+import json
 import re
+import subprocess
 from pathlib import Path
 
 import tensorflow as tf
@@ -120,3 +124,18 @@ def build_model(cfg, stats):
                            "next_image_output":
                            [keras.metrics.MeanMetricWrapper(keras.losses.mse, name="mse")]})
     return model
+
+
+# --- D: writing a run's records ---
+def git_commit():
+    try:
+        sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True).stdout.strip()
+        dirty = subprocess.run(["git", "status", "--porcelain"],
+                               capture_output=True, text=True).stdout.strip()
+        return sha + ("+uncommitted" if dirty else "")
+    except OSError:
+        return "unknown"
+
+def save_json(obj, path):
+    Path(path).write_text(json.dumps(obj, indent=2))

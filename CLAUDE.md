@@ -78,7 +78,8 @@ The repo has no test suite and no linter. To validate a change, run a `--max-epi
 **Rebuilding a run (`models/run_config.py`)**
 - `build_model(cfg, stats)` builds and compiles the model from a run's saved `config.json` and `norm_stats.json`. Training, `--eval-only`, and the analysis scripts that reload saved weights all use it.
 - The config readers there (`dataset_root`, `loss_weights`, `delta_factor`, `run_quat_ref`, `run_keep_ranges`, …) give older runs the defaults they were trained with.
-- `OUTPUTS` (the `outputs/` folder) lives here too.
+- `OUTPUTS` (the `outputs/` folder) lives here too, with `git_commit` and `save_json`, which write a run's records.
+- The Keras callbacks that add values to the logs or send them to W&B are in `models/callbacks.py`. `CheckMonitor`, which needs `MONITOR`, stays in `scripts/train.py`.
 
 **Training (`scripts/train.py`)**
 - Settings that are fixed on purpose are constants rather than CLI flags:

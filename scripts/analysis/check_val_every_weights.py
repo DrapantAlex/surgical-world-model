@@ -22,6 +22,7 @@ import h5py
 import numpy as np
 import pandas as pd
 
+from models.callbacks import TrainingProgress
 from scripts import train as T
 
 
@@ -31,7 +32,7 @@ def weights_path(run, batches):
 
 def save_every_check(run):
     """TrainingProgress + save_weights after every check (reads the weights, changes nothing)."""
-    class SaveEveryCheck(T.TrainingProgress):
+    class SaveEveryCheck(TrainingProgress):
         def on_epoch_end(self, epoch, logs=None):
             super().on_epoch_end(epoch, logs)
             self.model.save_weights(str(weights_path(run, (epoch + 1) * self.batches_per_check)))
@@ -88,5 +89,8 @@ if __name__ == "__main__":
         args = T.parse_args()
         if not args.deterministic:
             raise SystemExit("this check needs --deterministic")
-        T.TrainingProgress = save_every_check(args.run_name)   # train() looks the name up at call time
+        # replace the name INSIDE scripts.train: train() looks it up there at call time.
+        # Not models.callbacks.TrainingProgress: train.py holds its own reference (from its
+        # import), so changing the name in models.callbacks would not reach train()
+        T.TrainingProgress = save_every_check(args.run_name)
         T.train(args)
