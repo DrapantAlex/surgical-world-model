@@ -1073,3 +1073,4 @@ K = 1 is run 1a-val500 (checks every 500 batches, the same batch counts read off
 ## 2026-11-19
 
 - Analysis scripts moved to `scripts/analysis/`; commands in earlier entries refer to the old paths.
+- `check_wm_off_gradient` had been failing since E7 (`build_model` gained a `stats` argument in `6dd76b3`); fixed by passing `stats=None`. Re-run with today's code: same result as for E6 (weights 1, 0, 0: largest gradient difference 0.0 over 28 variables; control 1, 1, 0.1: 24 of 28 differ).
