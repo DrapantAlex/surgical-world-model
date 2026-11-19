@@ -172,11 +172,6 @@ def baselines_json(canonical, trimmed=False):
     name = "baselines" + ("_canonical" if canonical else "") + ("_trimmed" if trimmed else "")
     return OUTPUTS / name / "baselines.json"
 
-def shuffle_order(cfg):
-    """Which reshuffles the run trained on (see section D); runs saved before --val-every
-    were all normal Keras epochs."""
-    return cfg.get("shuffle_order", "keras_epochs")
-
 def episodes_for(split, max_episodes, root):
     """None = the whole split (read from the frame cache); else its first N episodes."""
     return None if max_episodes is None else data.get_split_episodes(split, root)[:max_episodes]
