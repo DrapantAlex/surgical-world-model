@@ -16,6 +16,7 @@ Moved here from `scripts/` on 2026-11-19; diary entries before that date use the
 |---|---|---|
 | `check_camera_duplicates.py` | Are the left and right endoscope videos identical, per episode? | diary 10-12, 10-15 (left camera only) |
 | `check_data_full.py` | Frames, episodes, pairs and RAM of the tissue-lift train and val splits | — (tissue lift, before the frame cache) |
+| `check_eval_unchanged.py` | Did a change move any number? `save <label>` re-evaluates runs (`--eval-only`, CPU) before it, `compare <label>` after it, every key exactly (default: E7, E8, 1c) | diary 11-19 (refactor) |
 | `check_model.py` | One batch of one episode through the model: shape check, no training | — (sanity tool) |
 | `check_orientation_error.py` | Actor error in mm and degrees per run (`check_orientation_error.json`) | decision 10-20; `experiment-comparison.md` §2, §6 (E1, E2, E6, E7) |
 | `check_quaternion_sign.py` | Is the action quaternion sign consistent across episodes? | decision 10-20 → `--canonical-quaternion` |
