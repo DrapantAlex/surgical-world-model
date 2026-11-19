@@ -99,14 +99,14 @@ def speed_bins(spd, moving):
 
 
 # --- C: predictions of one run, from its best weights ---
-def predict(run, loaded, cfg):
+def predict(run, loaded, cfg, stats):
     out = OUTPUTS / run
     if cfg.get("model_type") == "state_only":
         state_dim, action_dim = data.feature_dims(dataset_root(cfg))
         model = build_state_only_actor(state_dim, action_dim, cfg["hidden"])
         model.load_weights(str(out / "best.weights.h5"))
         return model.predict(loaded["states"][loaded["pair_index"]], batch_size=1024, verbose=0)
-    model = build_model(cfg)
+    model = build_model(cfg, stats)   # the run's own statistics (main asserts they are shared)
     model.load_weights(str(out / "best.weights.h5"))
     return predict_actions(model, loaded, cfg["batch_size"])
 
@@ -152,7 +152,7 @@ def main():
             assert (out / "norm_stats.json").read_text() == (first / "norm_stats.json").read_text(), run
             assert (out / "quat_reference.json").read_text() == (first / "quat_reference.json").read_text(), run
 
-            pos, rot, true = frame_errors(predict(run, loaded, cfg), loaded, stats)
+            pos, rot, true = frame_errors(predict(run, loaded, cfg, stats), loaded, stats)
             if args.max_episodes is None:   # same numbers as the diary (check_orientation_error)
                 saved = json.loads((out / "check_orientation_error.json").read_text())["results"]["val"]
                 assert np.isclose(pos.mean(), 1000 * saved["pos_err_raw_mean"], rtol=1e-3), (run, pos.mean())

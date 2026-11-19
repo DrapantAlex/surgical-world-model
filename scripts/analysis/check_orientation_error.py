@@ -171,7 +171,7 @@ def main():
     if cfg.get("model_type") == "state_only":
         raise SystemExit("state-only run: it is checked by scripts.train_state_only")
     stats = data.load_norm_stats(out / "norm_stats.json")
-    model = build_model(cfg)
+    model = build_model(cfg, stats)
     model.load_weights(str(out / "best.weights.h5"))
     check_run(out, cfg, stats, lambda split: predict_actions(model, split, cfg["batch_size"]),
               train_episodes=args.train_episodes, val_episodes=args.val_episodes,
