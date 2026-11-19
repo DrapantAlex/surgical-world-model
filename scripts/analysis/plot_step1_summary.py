@@ -1,6 +1,6 @@
 """Step 1 summary figures (1a, 1b, 1c) from each run's history.csv. No TF, no data loading.
 
-    python -m scripts.plot_step1_summary   ->  outputs/analysis/step1_summary/*.png
+    python -m scripts.analysis.plot_step1_summary   ->  outputs/analysis/step1_summary/*.png
 
 1. KUKA state / copy_state (log y), with copy (1) and constant velocity
 2. image / copy_frame (log y), with copy_frame (1)

@@ -159,14 +159,14 @@ E7 loss balance: state loss ≈ 200× (epoch 1) to 900× (epoch 11) the action l
 
 | Numbers | Script |
 | --- | --- |
-| E1, E2, E6, E7 (mm, degrees; paired test) | `scripts/check_orientation_error.py` → `scripts/compare_runs.py` |
-| Stand-still per horizon | `scripts/look_standstill_baseline.py` |
+| E1, E2, E6, E7 (mm, degrees; paired test) | `scripts/analysis/check_orientation_error.py` → `scripts/compare_runs.py` |
+| Stand-still per horizon | `scripts/analysis/look_standstill_baseline.py` |
 | E7 losses, WM vs f = 0 | `scripts/train.py` (`evaluate`, `metrics.state_delta_metrics`) |
 | E8, E9, chunk baselines | `scripts/train.py` (`metrics.chunk_metrics`, `metrics.chunk_baselines`) |
 | E8-trim; E8 on trimmed val | `scripts/train.py --keep-ranges`; `scripts/train.py --eval-only --eval-keep-ranges` |
-| Keep ranges (tool visible) | `scripts/look_tool_projection.py --all --export-keep-ranges` |
+| Keep ranges (tool visible) | `scripts/analysis/look_tool_projection.py --all --export-keep-ranges` |
 | copy_state | `scripts/baselines.py` |
-| D1, D2 | `scripts/look_delta_reference.py`, `scripts/look_delta_predictability.py` |
+| D1, D2 | `scripts/analysis/look_delta_reference.py`, `scripts/analysis/look_delta_predictability.py` |
 | Chunk probe | `chunk_probe.py` in the DGX scratchpad (not in the repository yet) |
 
 **Missing:** nothing in table 2. The chunk-probe script still has to be saved into the repository.

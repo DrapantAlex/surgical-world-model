@@ -1,7 +1,7 @@
 # Analysis scripts
 
-Inspection and check scripts: they measure or verify something, but never train a model
-for the thesis. Run them from the repo root:
+Inspection, check and figure scripts: they measure, verify or plot something, but never
+train a model for the thesis. Run them from the repo root:
 
 ```bash
 python -m scripts.analysis.<name> [args]
@@ -37,6 +37,12 @@ Moved here from `scripts/` on 2026-11-19; diary entries before that date use the
 | `look_state_groups.py` | KUKA / endo360 state curves of finished runs, from `history.csv` | — (commit `6eabc07`, 11-18; for runs before the in-training group logs) |
 | `look_static_vs_moving.py` | E1 / E2 / E6 errors split by phase and speed | diary 10-27 |
 | `look_tool_projection.py` | Projects the commanded tool position into the image; exports the keep ranges | diary 11-12; `configs/keep_ranges/README.md` |
+
+## Figures (`plot_*`): figures for the notes, from finished runs
+
+| Script | What it does | Supports |
+|---|---|---|
+| `plot_step1_summary.py` | Step 1 (1a, 1b, 1c) curves from `history.csv`: KUKA ÷ copy, image ÷ copy_frame, actor Huber → `outputs/analysis/step1_summary/` | — (notes, step 1) |
 
 ## Shared code
 
