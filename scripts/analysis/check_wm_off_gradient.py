@@ -33,7 +33,7 @@ def max_grad_diff(w_state, w_image, inputs, targets):
     cfg = {"latent_dim": 512, "encoder": "simple_cnn", "freeze_encoder": False,
            "unfreeze_last_n": 0, "lr": 3e-4, "dataset_root": str(ROOT),
            "w_next_state": w_state, "w_next_image": w_image}
-    model = build_model(cfg)
+    model = build_model(cfg, stats=None)   # stats only matter for --state-delta (E7), not set here
     with tf.GradientTape(persistent=True) as tape:
         pred = model(inputs, training=True)
         total = model.compute_loss(x=inputs, y=targets, y_pred=pred, training=True)
