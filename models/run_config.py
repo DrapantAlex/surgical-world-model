@@ -22,6 +22,7 @@ from models.simple_world_model.swm import build_actor_world_model
 # --w-next-state / --w-next-image (and the values of runs saved before those options)
 LOSS_WEIGHTS = {"action_output": 1.0, "next_state_output": 1.0, "next_image_output": 0.1}
 OUTPUTS = Path("outputs")
+REPO = Path(__file__).resolve().parents[1]   # models/run_config.py -> the repo root
 
 
 # --- B: readers of a run's config.json and files (defaults = older runs) ---
@@ -31,8 +32,14 @@ def freeze_label(cfg):
     return f"frozen+last{cfg['unfreeze_last_n']}" if cfg["unfreeze_last_n"] else "frozen"
 
 def dataset_root(cfg):
-    """Runs saved before --dataset-root existed were all tissue lift."""
-    return Path(cfg.get("dataset_root", data.ROOT))
+    """Runs saved before --dataset-root existed were all tissue lift. An absolute path inside
+    the repo (the first STAR-IL runs, 2026-10-16/20) becomes the repo-relative one that every
+    other run, baselines.json and the frame-cache manifest use: Path equality compares the
+    spelling, not the folder. Scripts run from the repo root, so both name the same files."""
+    root = Path(cfg.get("dataset_root", data.ROOT))
+    if root.is_absolute() and root.is_relative_to(REPO):
+        return root.relative_to(REPO)
+    return root
 
 def run_quat_ref(cfg, out):
     """The run's saved reference rotations, or None (runs before the option: raw signs)."""
