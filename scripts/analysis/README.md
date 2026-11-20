@@ -32,6 +32,7 @@ Moved here from `scripts/` on 2026-11-19; diary entries before that date use the
 | `look_delta_reference.py` | E7 D1: reference losses of the Δ head on train and val | diary 10-29 |
 | `look_endo360.py` | endo360 checks 1–3: glitches, sample-and-hold, share of the error | diary 11-17 |
 | `look_frame_difference.py` | From which gap k does frame t − k clearly differ from frame t? | — (output in `outputs/analysis/frame_difference/`) |
+| `look_history_ablation.py` | History inputs: best weights of the `--history` runs evaluated with Δs, Δa or both zeroed (GPU; "full" vs `val_metrics.json` within 1e-4 relative) → `outputs/analysis/history_ablation/` | — (history experiment, 11-20; diary entry to come) |
 | `look_standstill_baseline.py` | Stand-still error of a(t) vs a(t+h), h = 1..60 | diary 10-23; `experiment-comparison.md` |
 | `look_state_delta.py` | E7: size of the one-frame state change per dimension | diary 10-28 |
 | `look_state_groups.py` | KUKA / endo360 state curves of finished runs, from `history.csv` | — (commit `6eabc07`, 11-18; for runs before the in-training group logs) |
