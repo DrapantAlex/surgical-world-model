@@ -34,7 +34,8 @@ import wandb
 from tensorflow import keras
 
 from models import data, metrics
-from models.callbacks import ConstantLogs, EpochTimer, StateGroupLogs, TrainingProgress, WandbLogger
+from models.callbacks import (CheckMonitor, ConstantLogs, EpochTimer, StateGroupLogs,
+                              TrainingProgress, WandbLogger, timeline_callback)
 from models.encoders import ENCODERS
 from models.evaluation import chunk_baseline_metrics, comparison_table, evaluate
 from models.pipeline import make_dataset
@@ -45,7 +46,6 @@ from models.run_config import (LOSS_WEIGHTS, OUTPUTS, build_model, dataset_root,
                                episodes_for, freeze_label, git_commit, loss_weights,
                                metric_name, run_keep_ranges, run_quat_ref, save_json)
 from models.simple_world_model.swm import WM_MIXER_KERNEL
-from models.visualization import WorldModelTimelineCallback
 
 # --- 0: fixed choices (deliberately not command-line options) ---
 # the loss weights (LOSS_WEIGHTS) live in models/run_config.py: rebuilding a run needs them
@@ -153,24 +153,7 @@ def log_tensorboard(val_metrics, log_dir, step):
             tf.summary.scalar(k, v, step=step)
 
 
-# --- C: callbacks that depend on training choices (the others: models/callbacks.py) ---
-class CheckMonitor(keras.callbacks.Callback):
-    """Stops at once if Keras does not log MONITOR (loss names differ between versions)."""
-    def on_epoch_end(self, epoch, logs=None):
-        if epoch == 0 and MONITOR not in (logs or {}):
-            raise KeyError(f"{MONITOR!r} is not in the Keras logs: {sorted(logs or {})}")
-
-def timeline_callback(val, run, log_dir, every, root):
-    """The existing GT/PRED timeline, on the first validation episode (8 frames, 10 apart)."""
-    ep = int(val["episode_index"][0])
-    t = val["pair_index"][val["episode_index"][val["pair_index"]] == ep]
-    inputs, targets = data.get_pairs(val, t)
-    return WorldModelTimelineCallback(log_dir, inputs, targets, data.load_instruction(ep, root),
-                                      wandb_run=run, num_frames=8, start=0, stride=10,
-                                      every=every)
-
-
-# --- D: training ---
+# --- C: training ---
 def train(args):
     run_name = args.run_name or (f"{args.encoder}-{freeze_label(vars(args))}-lat{args.latent_dim}"
                                  f"-s{args.seed}-{datetime.now():%Y%m%d-%H%M}")
@@ -311,7 +294,7 @@ def train(args):
     callbacks = [
         EpochTimer(),
         TrainingProgress(batches_per_check, batches_per_epoch),
-        CheckMonitor(),
+        CheckMonitor(MONITOR),
         ConstantLogs(reference_logs),
         StateGroupLogs({metric_name(g): [metric_name(state_names[i]) for i in dims]
                         for g, dims in groups.items()}),
@@ -330,7 +313,7 @@ def train(args):
                         callbacks=callbacks, verbose=2)
     train_time_min = (time.time() - t0) / 60
 
-    # --- E: evaluate the BEST weights with the same metrics as the baselines ---
+    # --- D: evaluate the BEST weights with the same metrics as the baselines ---
     model.load_weights(str(out / "best.weights.h5"))
     val_metrics = evaluate(model, val, stats, args.batch_size, root, factor, keep_ranges, glitch_thr)
     chunk_base = chunk_baseline_metrics(val, stats, root) if args.chunk else None
@@ -378,7 +361,7 @@ def train(args):
     run.finish()
 
 
-# --- F: re-evaluate a finished run with ITS saved statistics ---
+# --- E: re-evaluate a finished run with ITS saved statistics ---
 def eval_only(args):
     out = OUTPUTS / args.run_name
     cfg = json.loads((out / "config.json").read_text())

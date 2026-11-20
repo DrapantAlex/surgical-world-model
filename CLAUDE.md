@@ -94,11 +94,11 @@ The repo has no test suite and no linter. To validate a change, run the full-opt
 - `OUTPUTS` (the `outputs/` folder) lives here too, with `git_commit` and `save_json`, which write a run's records.
 
 **Callbacks and visualisation (`models/callbacks.py`, `models/visualization.py`)**
-- The Keras callbacks that add values to the logs or send them to W&B are in `models/callbacks.py`. `CheckMonitor`, which needs `MONITOR`, stays in `scripts/train.py`.
+- All Keras callbacks are in `models/callbacks.py`: the ones that add values to the logs or send them to W&B, `CheckMonitor` (it gets `MONITOR` from `scripts/train.py` as an argument) and `timeline_callback`.
 - `models/visualization.py` draws the GT/PRED timeline for TensorBoard and W&B.
 
 **Training (`scripts/train.py`)**
-- It holds the command line, `train()`, `eval_only()`, two small helpers (`checks`, `log_tensorboard`), and the two pieces that depend on training choices (`CheckMonitor`, `timeline_callback`). Everything else it imports from `models/`.
+- It holds the command line, `train()`, `eval_only()` and two small helpers (`checks`, `log_tensorboard`). Everything else it imports from `models/`.
 - Settings that are fixed on purpose are constants rather than CLI flags:
   - the loss weights (action 1.0, state 1.0, image 0.1) are `LOSS_WEIGHTS` in `models/run_config.py`, because rebuilding a run needs them;
   - `MONITOR = val_action_output_loss` (checkpointing and early stopping) and the W&B project are at the top of `scripts/train.py`.

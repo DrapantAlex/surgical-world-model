@@ -1,12 +1,17 @@
 """Keras callbacks that add values to each check's logs (time, real x-axis, reference
-lines, state-group curves) or send them to W&B. Shared by scripts/train.py and
+lines, state-group curves) or send them to W&B, plus CheckMonitor (stops if the monitored
+metric is not logged) and the GT/PRED timeline. Shared by scripts/train.py and
 scripts/train_state_only.py. Moved here from scripts/train.py on 2026-11-19 (refactor
-step 4a), unchanged. CheckMonitor stays in train.py, next to MONITOR.
+step 4a) and 2026-11-20 (CheckMonitor, timeline_callback), unchanged except that
+CheckMonitor now gets the monitored name as an argument (train.py keeps MONITOR).
 """
 import time
 
 import numpy as np
 from tensorflow import keras
+
+from models import data
+from models.visualization import WorldModelTimelineCallback
 
 
 class EpochTimer(keras.callbacks.Callback):
@@ -69,3 +74,23 @@ class WandbLogger(keras.callbacks.Callback):
     def on_epoch_end(self, epoch, logs=None):
         self.run.log({k: float(v) for k, v in (logs or {}).items()
                       if "next_state_output_mse_" not in k}, step=epoch)
+
+class CheckMonitor(keras.callbacks.Callback):
+    """Stops at once if Keras does not log `monitor` (loss names differ between versions).
+    monitor: the name checkpointing and early stopping watch (train.py: MONITOR)."""
+    def __init__(self, monitor):
+        super().__init__()
+        self.monitor = monitor
+
+    def on_epoch_end(self, epoch, logs=None):
+        if epoch == 0 and self.monitor not in (logs or {}):
+            raise KeyError(f"{self.monitor!r} is not in the Keras logs: {sorted(logs or {})}")
+
+def timeline_callback(val, run, log_dir, every, root):
+    """The existing GT/PRED timeline, on the first validation episode (8 frames, 10 apart)."""
+    ep = int(val["episode_index"][0])
+    t = val["pair_index"][val["episode_index"][val["pair_index"]] == ep]
+    inputs, targets = data.get_pairs(val, t)
+    return WorldModelTimelineCallback(log_dir, inputs, targets, data.load_instruction(ep, root),
+                                      wandb_run=run, num_frames=8, start=0, stride=10,
+                                      every=every)
