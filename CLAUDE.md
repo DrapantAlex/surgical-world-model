@@ -22,8 +22,14 @@ Current phase: training on STAR-IL (single-arm). Next: ablation studies on visua
 - Ask me when information is missing instead of making silent assumptions.
 - Never launch long training runs. Prepare the exact command and let me run it in tmux.
 - Don't load full datasets to inspect data: use `--max-episodes` or a few samples.
-- After every change, run a smoke run with a new run name, for example
-  `python -m scripts.train --run-name smoke-<short-description> --max-episodes 2 --epochs 2 --wandb-mode offline`.
+- After every change, run a smoke run with a new run name. Use the full-option STAR-IL command, so the chunk, skip, mixer, keep-ranges, `--val-every` and canonical-quaternion paths are all exercised:
+  ```bash
+  python -m scripts.train --run-name smoke-<short-description> \
+      --dataset-root data/open_h/Surgical/jhu/imerse/star_il/star_il --max-episodes 2 --epochs 2 \
+      --wandb-mode offline --canonical-quaternion --chunk 16 --state-skip --wm-mixer-blocks 1 \
+      --keep-ranges configs/keep_ranges/star_il_tool_visible.csv --val-every 50
+  ```
+- If a code change must not change any number (a refactor, a move, a fix elsewhere), also run `python -m scripts.analysis.check_eval_unchanged compare pre-refactor`: it re-evaluates the E7, E8 and 1c runs on CPU and compares every key exactly against the saved pre-refactor values (exit 1 if anything differs). After a change that is meant to move numbers, save a new baseline with `save <label>` and compare later changes against that one.
 - Never touch the test split and never modify `reference/simple_world_model.py`.
 
 ## Environment and commands
@@ -42,7 +48,7 @@ python -m scripts.train --dataset-root data/open_h/Surgical/jhu/imerse/star_il/s
 python -m scripts.train_overfit                        # overfit one episode (pipeline sanity check)
 ```
 
-The repo has no test suite and no linter. To validate a change, run a `--max-episodes` smoke run. The `scripts/analysis/check_*.py` and `scripts/analysis/look_*.py` files are inspection scripts (run as `python -m scripts.analysis.<name>`), listed with their diary entries in `scripts/analysis/README.md`.
+The repo has no test suite and no linter. To validate a change, run the full-option smoke run above and, for changes that must not move any number, `check_eval_unchanged compare pre-refactor`. The `scripts/analysis/check_*.py` and `scripts/analysis/look_*.py` files are inspection scripts (run as `python -m scripts.analysis.<name>`), listed with their diary entries in `scripts/analysis/README.md`.
 
 ## Architecture
 
