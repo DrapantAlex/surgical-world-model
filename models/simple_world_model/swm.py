@@ -15,7 +15,7 @@ def build_actor_world_model(state_dim, action_dim, img_h=IMG_H, img_w=IMG_W, lan
                             latent_dim=LATENT_DIM, encoder="simple_cnn",
                             freeze_encoder=False, unfreeze_last_n=0, delta_factor=None,
                             action_chunk=None, state_skip=False, state_layers=1, init_seed=0,
-                            wm_mixer_blocks=0):
+                            wm_mixer_blocks=0, history_dim=0):
     # NEW (E7): delta_factor = data.state_delta_factor(stats) -> the state head predicts the
     #   change f (in Δ/scale units) and next_state = state + delta_factor * f; None = original
     # NEW (E8): action_chunk = k -> the actor predicts k offsets from a(t-1), shape (k, action_dim)
@@ -25,6 +25,14 @@ def build_actor_world_model(state_dim, action_dim, img_h=IMG_H, img_w=IMG_W, lan
     #   init_seed (the run's --seed) seeds the K-1 extra layers' initialisers
     # NEW (1c): wm_mixer_blocks = D residual ConvMixer blocks on the encoder map, read by the WM
     #   branch only (both heads); 0 = original. Each block starts as the identity.
+    # NEW (history): history_dim = len(h(t)) = state_dim + action_dim -> one more Input,
+    #   history_input = [Δs(t), Δa(t-1)] / scale (data.py D3), appended LAST to the actor's and
+    #   the WM's Concatenate; 0 = original. No new layer: the first Dense of the actor, the first
+    #   Dense of the state head and the latent Dense get history_dim more input rows. Glorot's
+    #   limit depends on fan_in, so those three kernels start different from 1a; every other
+    #   weight starts identical (each initialiser draw takes one seed, whatever its shape).
+    if history_dim < 0:
+        raise ValueError(f"history_dim must be >= 0, got {history_dim}")
     if state_skip and delta_factor is not None:
         raise ValueError("state_skip and delta_factor are two different state heads: choose one")
     if state_layers < 1:
@@ -39,6 +47,8 @@ def build_actor_world_model(state_dim, action_dim, img_h=IMG_H, img_w=IMG_W, lan
     state_input = keras.Input(shape=(state_dim,), name="state_input")
     language_input = keras.Input(shape=(lang_dim,), name="language_input")
     action_input = keras.Input(shape=(action_dim,), name="action_input")
+    history = ([keras.Input(shape=(history_dim,), name="history_input")]   # NEW (history)
+               if history_dim > 0 else [])
 
     # --- B: visual encoder (CHANGED: chosen by name; "simple_cnn" = the original 4 convs) ---
     encoded_img = build_encoder(encoder, image_input, freeze_encoder, unfreeze_last_n)
@@ -46,7 +56,8 @@ def build_actor_world_model(state_dim, action_dim, img_h=IMG_H, img_w=IMG_W, lan
                                                        # (decoder start: 4 x2 upsamplings back to img size)
 
     # --- C: actor branch (sizes only) ---
-    actor_features = layers.Concatenate()([encoded_img, state_input, language_input])
+    actor_features = layers.Concatenate()(
+        [encoded_img, state_input, language_input] + history)   # NEW (history): + h(t)
     a_x = layers.Dense(256, activation="relu")(actor_features)
     if action_chunk is None:
         action_output = layers.Dense(action_dim, name="action_output")(a_x)
@@ -86,7 +97,8 @@ def build_actor_world_model(state_dim, action_dim, img_h=IMG_H, img_w=IMG_W, lan
         wm_img = layers.Flatten(name="wm_flat")(x)
     
     wm_features = layers.Concatenate()(
-        [wm_img, state_input, language_input, action_input])   # 1c: wm_img (actor: encoded_img)
+        [wm_img, state_input, language_input, action_input]   # 1c: wm_img (actor: encoded_img)
+        + history)                                             # NEW (history): + h(t)
 
     s_x = layers.Dense(128, activation="relu")(wm_features)
     # NEW (1b): deeper state head. Keras draws initial weights in layer-creation order from one
@@ -129,7 +141,7 @@ def build_actor_world_model(state_dim, action_dim, img_h=IMG_H, img_w=IMG_W, lan
         name="next_image_output")(dec)
 
     return keras.Model(
-        inputs=[image_input, state_input, language_input, action_input],
+        inputs=[image_input, state_input, language_input, action_input] + history,
         outputs=[action_output, next_state_output, next_image_output],
         name="actor_world_model")
 

@@ -20,6 +20,7 @@ The test split is never loaded.
   python -m scripts.train ... --keep-ranges configs/keep_ranges/star_il_tool_visible.csv
                                               # only the kept frames (pairs + statistics)
   python -m scripts.train ... --val-every 500 # one check (full val) every 500 train batches
+  python -m scripts.train ... --history       # + [Δs(t), Δa(t-1)] as input to both branches
 """
 import argparse
 import json
@@ -44,7 +45,8 @@ from models.references import (constvel_huber, constvel_state_mse_per_dim, copy_
                                standstill_huber, trainmean_huber)
 from models.run_config import (LOSS_WEIGHTS, OUTPUTS, build_model, dataset_root, delta_factor,
                                episodes_for, freeze_label, git_commit, loss_weights,
-                               metric_name, run_keep_ranges, run_quat_ref, save_json)
+                               metric_name, run_history, run_keep_ranges, run_quat_ref,
+                               save_json)
 from models.simple_world_model.swm import WM_MIXER_KERNEL
 
 # --- 0: fixed choices (deliberately not command-line options) ---
@@ -98,6 +100,9 @@ def parse_args():
     p.add_argument("--chunk", type=int, default=None,
                    help="E8: actor predicts this many offsets a(t+i) - a(t-1), option-C scale "
                         "per step and group (saved in norm_stats.json); default: a(t) only")
+    p.add_argument("--history", action="store_true",
+                   help="history inputs: h(t) = [Δs(t), Δa(t-1)] / train std, to the actor and "
+                        "the WM (scale saved in norm_stats.json); 0 where the earlier row is missing")
     p.add_argument("--keep-ranges", default=None,
                    help="CSV episode, first_visible, last_visible: use only those frames for "
                         "pairs and statistics (copied into the run folder, with its hash)")
@@ -192,13 +197,16 @@ def train(args):
     if args.chunk:   # E8: option-C chunk scale from the full train split, like the norm stats
         stats["action_chunk"] = data.compute_chunk_scale(train_eps, root, quat_ref, args.chunk,
                                                          CHUNK_FLOOR_C, keep_ranges)
+    if args.history:   # history: per-dim std of h(t) over the full train split's pairs
+        stats["history_scale"] = data.compute_history_scale(train_eps, root, stats, quat_ref,
+                                                            args.chunk, keep_ranges)
     data.save_norm_stats(stats, out / "norm_stats.json")
     train_split = data.load_split("train", root=root, stats=stats, quat_ref=quat_ref,
                                   episodes=episodes_for("train", args.max_episodes, root),
-                                  chunk=args.chunk, keep_ranges=keep_ranges)
+                                  chunk=args.chunk, keep_ranges=keep_ranges, history=args.history)
     val = data.load_split("val", root=root, stats=stats, quat_ref=quat_ref,
                           episodes=episodes_for("val", args.max_episodes, root), chunk=args.chunk,
-                          keep_ranges=keep_ranges)
+                          keep_ranges=keep_ranges, history=args.history)
     # evaluation schedule: one Keras "epoch" = one check. Normal runs: a check per real epoch.
     # --val-every N: the passes repeated endlessly, cut into checks of N batches (shuffle
     # order: see below); --epochs/--patience/--vis-every converted from real epochs
@@ -277,6 +285,9 @@ def train(args):
         vis_every_checks=vis_every_checks,
         shuffle_order="repeat" if args.val_every else "keras_epochs",
         n_val_constvel_fallback=n_fallback,   # pairs without s(t-1) in the kept window: copy
+        # history: pairs whose Δs / Δa is 0 because the earlier row is missing (None: off)
+        n_train_history_fallback=train_split.get("n_history_fallback"),
+        n_val_history_fallback=val.get("n_history_fallback"),
         glitch_threshold=glitch_thr.tolist(),  # per state dim, normalised (references.GLITCH_G x train p99 |Δ|)
         keep_ranges_sha256=keep_hash,
         train_episodes=np.unique(train_split["episode_index"]).tolist(),
@@ -350,7 +361,7 @@ def train(args):
                                 "state_delta": args.state_delta, "state_skip": args.state_skip,
                                 "state_layers": args.state_layers,
                                 "wm_mixer_blocks": args.wm_mixer_blocks,
-                                "chunk": args.chunk,
+                                "chunk": args.chunk, "history": args.history,
                                 "keep_ranges": Path(args.keep_ranges).name if args.keep_ranges else None,
                                 "epochs": cfg["epochs_run"],
                                 "best_epoch": cfg["best_epoch"],
@@ -385,7 +396,7 @@ def eval_only(args):
     val = data.load_split("val", root=root, stats=stats, quat_ref=quat_ref,
                           episodes=episodes_for("val", cfg["max_episodes"], root),
                           chunk=cfg.get("chunk"),   # runs before E8: no "chunk" key
-                          keep_ranges=keep_ranges)
+                          keep_ranges=keep_ranges, history=run_history(cfg))
     model = build_model(cfg, stats)
     model.load_weights(str(out / "best.weights.h5"))
     val_metrics = evaluate(model, val, stats, cfg["batch_size"], root, delta_factor(cfg, stats),

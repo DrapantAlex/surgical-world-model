@@ -283,15 +283,65 @@ def chunk_factor(stats):
     std = np.asarray(stats["action"]["std"], dtype=np.float32)
     return (std + 1e-8) / chunk_scale_per_dim(stats)
 
+def prev2_in_episode(split, t):
+    """For each position t: is t-2 in the same episode? (The rule of chunk_anchors.)"""
+    t = np.asarray(t)
+    before = np.maximum(t - 2, 0)
+    return (t >= 2) & (split["episode_index"][before] == split["episode_index"][t])
+
 def chunk_anchors(split, t):
     """E8: a_n(t-1) (the anchor) and a_n(t-2) for the constant-velocity baseline, normalised.
     Where t-2 is not in t's episode (t = 1), a_n(t-1) is returned again: velocity 0."""
     t = np.asarray(t)
-    before = np.maximum(t - 2, 0)
-    same = (t >= 2) & (split["episode_index"][before] == split["episode_index"][t])
+    same = prev2_in_episode(split, t)
     anchor = split["actions"][t - 1]
-    prev = np.where(same[:, None], split["actions"][before], anchor)
+    prev = np.where(same[:, None], split["actions"][np.maximum(t - 2, 0)], anchor)
     return anchor, prev
+
+def prev_in_window(split, keep_ranges):
+    """For each pair t: is s(t-1) in the same episode AND inside its kept window? (Frames
+    outside the window exist in the split, but the run never uses them.)
+    Moved here from models/references.py (history inputs), unchanged."""
+    t, ep = split["pair_index"], split["episode_index"]
+    episodes, starts, lengths = np.unique(ep, return_index=True, return_counts=True)
+    first_kept = np.empty(len(ep), np.int64)   # first kept row of each row's episode
+    for e, s, T in zip(episodes, starts, lengths):
+        first_kept[s:s + T] = s + kept_window(int(e), int(T), keep_ranges)[0]
+    return t - 1 >= first_kept[t]
+
+
+# --- D3: history inputs (--history): the last state change and the last command change ---
+# h(t) = [Δs(t), Δa(t-1)] = [s_n(t) - s_n(t-1), a_n(t-1) - a_n(t-2)], normalised units, each dim
+# divided by a train std (no mean subtracted: 0 still means "no change"). Each change uses the
+# rule of its own constant-velocity reference line, so the history carries exactly that
+# information: Δs -> prev_in_window (constvel_state), Δa -> chunk_anchors (constvel_huber).
+def history_changes(split, keep_ranges):
+    """Per pair t of split["pair_index"]: (P, state_dim + action_dim) float64, unscaled, 0 where
+    the earlier row is not available; and the two masks (ok_s, ok_a), True = a real change."""
+    t, s = split["pair_index"], split["states"]
+    ok_s = prev_in_window(split, keep_ranges)
+    ok_a = prev2_in_episode(split, t)
+    ds = np.where(ok_s[:, None], s[t].astype(np.float64) - s[t - 1], 0.0)
+    anchor, prev = chunk_anchors(split, t)            # prev = anchor where ok_a is False
+    da = anchor.astype(np.float64) - prev             # so exactly 0 there
+    return np.concatenate([ds, da], axis=1), ok_s, ok_a
+
+def compute_history_scale(episodes, root=ROOT, stats=None, quat_ref=None, chunk=None,
+                          keep_ranges=None):
+    """Per history dim: the std of that change over the given (training) episodes' pairs (the
+    run's pair rule: chunk and keep ranges), normalised units. Tables only. Saved in
+    norm_stats.json as "history_scale". Raises if a dim has std 0."""
+    split = load_split("train", root=root, stats=stats, episodes=episodes, quat_ref=quat_ref,
+                       with_frames=False, chunk=chunk, keep_ranges=keep_ranges)
+    h, ok_s, ok_a = history_changes(split, keep_ranges)
+    state_dim = split["states"].shape[1]
+    # the std of the CHANGE: only real changes count (a fallback 0 is "unknown", not "still");
+    # each part has its own mask. ddof = 0, as compute_norm_stats
+    scale = np.concatenate([h[ok_s, :state_dim].std(axis=0), h[ok_a, state_dim:].std(axis=0)])
+    if (scale <= 0).any():
+        raise ValueError(f"history dims with std 0 in the train split: {np.flatnonzero(scale <= 0)}")
+    return {"scale": scale.tolist(), "n_pairs": int(len(h)),
+            "n_fallback": {"state": int((~ok_s).sum()), "action": int((~ok_a).sum())}}
 
 def save_norm_stats(stats, path):
     Path(path).write_text(json.dumps(stats, indent=2))
@@ -461,7 +511,7 @@ def cached_frames(split, episodes, camera=CAMERA, size=IMG_SIZE, root=ROOT, cach
 # --- F: many episodes (a whole split) ---
 def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episodes=None,
                use_cache=True, cache_dir=CACHE_DIR, quat_ref=None, with_frames=True, chunk=None,
-               keep_ranges=None):
+               keep_ranges=None, history=False):
     """Load every episode of a split ("train" or "val") into flat arrays.
 
     Each frame is stored once (uint8). `pair_index` lists the positions t whose
@@ -479,6 +529,9 @@ def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episo
     `keep_ranges` (B1): pairs only where the whole window (t, t+1 or t-1 .. t+k-1) lies in
     the episode's kept rows; frames, states and actions stay complete (the cache is unchanged).
     "n_pairs_untrimmed" = the count without keep_ranges, for comparison.
+    `history=True` (D3): the split carries "history" (N, state_dim + action_dim) float32, the
+    scaled h(t) at every pair row (needs stats["history_scale"]), for get_pairs, and
+    "n_history_fallback" (pairs whose Δs / Δa fell back to 0).
     """
     check_split(split)
     from_cache = with_frames and use_cache and episodes is None
@@ -528,7 +581,7 @@ def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episo
     if keep_ranges is not None:
         print(f"{split}: {len(pair_index)} pairs kept of {n_untrimmed} "
               f"({len(pair_index) / max(n_untrimmed, 1) - 1:+.1%}, keep ranges)")
-    return {
+    out = {
         "frames": frames,                 # (N, size, size, 3) uint8, or None (with_frames=False)
         "states": states,                 # (N, state_dim) normalised
         "actions": actions,               # (N, action_dim) normalised
@@ -539,6 +592,15 @@ def load_split(split, root=ROOT, camera=CAMERA, size=IMG_SIZE, stats=None, episo
         "stats": stats,
         **({} if chunk is None else {"chunk_factor": chunk_factor(stats)}),   # E8: (k, action_dim)
     }
+    if history:   # NEW (history): h(t) / scale at the pair rows (other rows are never read)
+        h, ok_s, ok_a = history_changes(out, keep_ranges)
+        scale = np.asarray(stats["history_scale"]["scale"], np.float64)
+        out["history"] = np.zeros((N, len(scale)), np.float32)
+        out["history"][pair_index] = (h / scale).astype(np.float32)
+        out["n_history_fallback"] = {"state": int((~ok_s).sum()), "action": int((~ok_a).sum())}
+        print(f"{split}: history fallback (change = 0) on {out['n_history_fallback']['state']} "
+              f"pairs for Δs, {out['n_history_fallback']['action']} for Δa, of {len(pair_index)}")
+    return out
 
 
 def chunk_targets(data, t):
@@ -569,4 +631,6 @@ def get_pairs(data, idx):
     }
     if "chunk_factor" in data:   # E8: the actor imitates the chunk offsets instead
         targets["action_output"] = chunk_targets(data, t)
+    if "history" in data:        # NEW (history): [Δs(t), Δa(t-1)] / scale
+        inputs["history_input"] = data["history"][t]
     return inputs, targets

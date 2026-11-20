@@ -72,6 +72,9 @@ def delta_factor(cfg, stats):
     --state-delta (and runs saved before the option)."""
     return data.state_delta_factor(stats) if cfg.get("state_delta", False) else None
 
+def run_history(cfg):
+    """History inputs on? Runs saved before --history: off."""
+    return cfg.get("history", False)
 
 
 # --- C: model, losses and metrics as compiled for training ---
@@ -115,7 +118,8 @@ def build_model(cfg, stats):
                                     state_skip=cfg.get("state_skip", False),   # 1a; older runs: off
                                     state_layers=cfg.get("state_layers", 1),   # 1b; older runs: 1
                                     init_seed=cfg.get("seed", 0),   # 1b/1c: seeds of the extra layers
-                                    wm_mixer_blocks=cfg.get("wm_mixer_blocks", 0))   # 1c; older runs: 0
+                                    wm_mixer_blocks=cfg.get("wm_mixer_blocks", 0),   # 1c; older runs: 0
+                                    history_dim=state_dim + action_dim if run_history(cfg) else 0)
     model.compile(optimizer=keras.optimizers.Adam(learning_rate=cfg["lr"]),
                   loss={"action_output": keras.losses.Huber(),
                         "next_state_output": "mse" if factor is None else scaled_huber(factor),

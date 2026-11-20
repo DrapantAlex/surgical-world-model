@@ -43,21 +43,11 @@ def copy_frame_mse(split, chunk=256):
         image.update(inputs["image_input"], targets["next_image_output"])
     return image.result()
 
-def prev_in_window(split, keep_ranges):
-    """For each pair t: is s(t-1) in the same episode AND inside its kept window? (Frames
-    outside the window exist in the split, but the run never uses them.)"""
-    t, ep = split["pair_index"], split["episode_index"]
-    episodes, starts, lengths = np.unique(ep, return_index=True, return_counts=True)
-    first_kept = np.empty(len(ep), np.int64)   # first kept row of each row's episode
-    for e, s, T in zip(episodes, starts, lengths):
-        first_kept[s:s + T] = s + data.kept_window(int(e), int(T), keep_ranges)[0]
-    return t - 1 >= first_kept[t]
-
 def constvel_state(split, keep_ranges):
     """Constant velocity s(t) + (s(t) - s(t-1)) for every pair (normalised units); copy (Δ = 0)
-    where s(t-1) is not available (prev_in_window). Returns (prediction, n_fallback_pairs)."""
+    where s(t-1) is not available (data.prev_in_window). Returns (prediction, n_fallback_pairs)."""
     t, s = split["pair_index"], split["states"]
-    ok = prev_in_window(split, keep_ranges)
+    ok = data.prev_in_window(split, keep_ranges)
     vel = np.where(ok[:, None], s[t].astype(np.float64) - s[t - 1], 0.0)
     return s[t] + vel, int((~ok).sum())
 
