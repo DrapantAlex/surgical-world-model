@@ -39,9 +39,9 @@ from models.callbacks import (CheckMonitor, ConstantLogs, EpochTimer, StateGroup
 from models.encoders import ENCODERS
 from models.evaluation import chunk_baseline_metrics, comparison_table, evaluate
 from models.pipeline import make_dataset
-from models.references import (constvel_state_mse_per_dim, copy_frame_mse, copy_state_mse,
-                               copy_state_mse_per_dim, glitch_thresholds, standstill_huber,
-                               trainmean_huber)
+from models.references import (constvel_huber, constvel_state_mse_per_dim, copy_frame_mse,
+                               copy_state_mse, copy_state_mse_per_dim, glitch_thresholds,
+                               standstill_huber, trainmean_huber)
 from models.run_config import (LOSS_WEIGHTS, OUTPUTS, build_model, dataset_root, delta_factor,
                                episodes_for, freeze_label, git_commit, loss_weights,
                                metric_name, run_keep_ranges, run_quat_ref, save_json)
@@ -248,9 +248,10 @@ def train(args):
         reference_logs[f"val_next_state_{metric_name(g)}_mse_constvel"] = float(constvel_dim[dims].mean())
     glitch_thr = glitch_thresholds(train_split)   # for the glitch report of the final evaluation
     if args.chunk:   # E8: the actor's reference lines, in the loss units:
-        # stand-still (offsets 0) and the input-free mean train offset
+        # stand-still (offsets 0), the input-free mean train offset and constant velocity
         reference_logs["val_action_output_loss_standstill"] = standstill_huber(val)
         reference_logs["val_action_output_loss_trainmean"] = trainmean_huber(train_split, val)
+        reference_logs["val_action_output_loss_constvel"] = constvel_huber(val, stats)
     if factor is not None:
         reference_logs["val_next_state_output_loss_zero"] = metrics.state_delta_metrics(
             val["states"][val["pair_index"]], val["states"][val["pair_index"]],

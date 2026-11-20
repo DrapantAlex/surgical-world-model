@@ -123,3 +123,14 @@ def standstill_huber(val):
     partial last batch is over-weighted; logged curves can differ from this line by ~1e-4."""
     true = data.chunk_targets(val, val["pair_index"])   # the get_pairs target, no frames
     return float(keras.losses.Huber()(true, np.zeros_like(true)))
+
+def constvel_huber(val, stats):
+    """Val action loss of constant velocity, offset_i = (i+1) x (a(t-1) - a(t-2)), in the
+    option-C target units, with the compiled Huber() like standstill_huber. The prediction
+    is metrics.chunk_baselines on data.chunk_anchors (velocity 0 where t-2 is not in t's
+    episode): the same functions as chunk_baselines.json, so both always agree. The rule
+    that uses the last command change (the --history experiment's actor bar)."""
+    t = val["pair_index"]
+    true = data.chunk_targets(val, t)
+    pred = metrics.chunk_baselines(*data.chunk_anchors(val, t), stats)["constvel"]
+    return float(keras.losses.Huber()(true, pred.astype(np.float32)))
