@@ -1110,7 +1110,15 @@ Design choices in `--history` [M: from the code]:
 
 ### My five lines and outcomes
 
-<!-- TODO(human): my five lines as written BEFORE the runs (question, hypothesis, prediction, surprise, change), each with its outcome from the results below, in the format of 11-17 ("Step 1b: my five lines and outcomes"). -->
+My exact pre-run wording was not recorded. These lines are **reconstructed on 11-23 from the evidence that existed before the runs**: the probes in `docs/experiment-comparison.md` §5 (D2 and the chunk probe, fitted on train, scored on val) and the design in `fda6107`. Read the "Prediction" row with that in mind.
+
+| | | Outcome |
+|---|---|---|
+| Question | Does one step of history (the last state change and the last command change) let the network get past "nothing changes", in the actor and in the WM? | **Yes, in both branches.** [M] |
+| Hypothesis | (from the probes) Without history the targets are not learnable from one frame + one state; with one step of history they are, and they generalise. Chunk probe: every no-history probe ≈ stand-still or worse; s(t) + Δa → −33%. D2: the last state change makes Δstate predictable (0.42× f = 0) | **Supported.** Without history, 5 of 5 runs are at stand-still at their best check; with history 0.556×. [M] |
+| Prediction | Actor clearly below stand-still, about the probe's level (0.68× stand-still on its val pairs), **mostly through Δa** (Δa alone was the strongest single probe input, −25%). WM state below copy_state for the first time | **Level: better than predicted** (0.556×). **WM: confirmed** (159 / 160 checks below copy). **Mechanism: wrong.** The actor relies on **Δs**, not Δa (zeroing Δs → 0.916×, zeroing Δa → 0.611×). The chunk probe never tested Δs as an actor input, so it could not have shown this. [M] |
+| Surprise | The actor stays at stand-still even with history (the network can't use what a linear probe can) | **Not observed.** [M] |
+| Change | h(t) to both branches, appended last; everything else as 1a (`--state-skip`, trimmed, chunk 16, `--val-every 1000`) | **Holds,** except that the three Dense kernels with 15 more input rows start differently (Glorot fan-in); every other weight starts as in 1a. [M: from the code] |
 
 ### Results
 
