@@ -24,7 +24,6 @@ The test split is never loaded.
 """
 import argparse
 import json
-import shutil
 import time
 from datetime import datetime
 from pathlib import Path
@@ -43,10 +42,10 @@ from models.pipeline import make_dataset
 from models.references import (constvel_huber, constvel_state_mse_per_dim, copy_frame_mse,
                                copy_state_mse, copy_state_mse_per_dim, glitch_thresholds,
                                standstill_huber, trainmean_huber)
-from models.run_config import (LOSS_WEIGHTS, OUTPUTS, build_model, dataset_root, delta_factor,
-                               episodes_for, freeze_label, git_commit, loss_weights,
-                               metric_name, run_history, run_keep_ranges, run_quat_ref,
-                               save_json)
+from models.run_config import (LOSS_WEIGHTS, OUTPUTS, build_model, check_schedule,
+                               dataset_root, delta_factor, episodes_for, freeze_label,
+                               git_commit, loss_weights, metric_name, prepare_stats,
+                               run_history, run_keep_ranges, run_quat_ref, save_json)
 from models.simple_world_model.swm import WM_MIXER_KERNEL
 
 # --- 0: fixed choices (deliberately not command-line options) ---
@@ -54,8 +53,7 @@ from models.simple_world_model.swm import WM_MIXER_KERNEL
 MONITOR = "val_action_output_loss"     # best checkpoint and early stopping (kept as in every
                                        # earlier run; the exact per-pair value is val_action_output_huber)
 WANDB_PROJECT = "surgical-world-model"
-DELTA_FLOOR_C = 0.25   # --state-delta: scale = max(median|Δ|, DELTA_FLOOR_C * mean|Δ|) per dim
-CHUNK_FLOOR_C = 0.25   # --chunk: scale = max(median, CHUNK_FLOOR_C * mean) of each group's offset norm
+# DELTA_FLOOR_C / CHUNK_FLOOR_C (the Δ and chunk scale floors) live in models/run_config.py
 LOGS = Path("logs")
 
 
@@ -146,11 +144,7 @@ def parse_args():
     return args
 
 
-# --- B: helpers shared by training and --eval-only ---
-def checks(x_epochs, batches_per_epoch, val_every):
-    """--val-every: a count in real epochs -> the number of checks (N batches each) it spans."""
-    return int(np.ceil(x_epochs * batches_per_epoch / val_every))
-
+# --- B: helpers (the --val-every schedule: run_config.check_schedule) ---
 def log_tensorboard(val_metrics, log_dir, step):
     """Final metrics of the best weights, same names as results.csv ("extra/..." its own group)."""
     with tf.summary.create_file_writer(str(Path(log_dir) / "best_val")).as_default():
@@ -172,56 +166,25 @@ def train(args):
     if args.deterministic:
         tf.config.experimental.enable_op_determinism()
 
-    # data: training-only statistics, saved with the run; never the test split.
-    # compute_norm_stats raises if the train split is incomplete: no fallback here.
+    # data: training-only statistics (keep ranges, quaternion reference, norm stats, Δ / chunk /
+    # history scales), saved with the run; never the test split (run_config.prepare_stats)
     root = Path(args.dataset_root)
-    train_eps, _ = data.drop_missing_videos("train", data.get_split_episodes("train", root),
-                                            root=root, verbose=False)
-    # optional keep ranges: copied into the run (eval-only reads the copy, checked by hash);
-    # used for every statistic below AND both splits' pairs
-    keep_ranges, keep_hash = None, None
-    if args.keep_ranges:
-        shutil.copyfile(args.keep_ranges, out / "keep_ranges.csv")
-        keep_hash = data.file_sha256(out / "keep_ranges.csv")
-        keep_ranges = data.load_keep_ranges(out / "keep_ranges.csv")   # checked in parse_args
-    # optional canonical quaternion signs: reference from the full train split, saved
-    # with the run, and used for the stats AND both splits (all through load_table)
-    quat_ref = None
-    if args.canonical_quaternion:
-        quat_ref = data.compute_quat_reference(train_eps, root, keep_ranges)
-        data.save_quat_reference(quat_ref, out / "quat_reference.json")
-    stats = data.compute_norm_stats(train_eps, root, quat_ref, keep_ranges)
-    if args.state_delta:   # E7: Δ scale from the full train split, like the norm stats
-        stats["state_delta"] = data.compute_delta_scale(train_eps, root, quat_ref, DELTA_FLOOR_C,
-                                                        keep_ranges)
-    if args.chunk:   # E8: option-C chunk scale from the full train split, like the norm stats
-        stats["action_chunk"] = data.compute_chunk_scale(train_eps, root, quat_ref, args.chunk,
-                                                         CHUNK_FLOOR_C, keep_ranges)
-    if args.history:   # history: per-dim std of h(t) over the full train split's pairs
-        stats["history_scale"] = data.compute_history_scale(train_eps, root, stats, quat_ref,
-                                                            args.chunk, keep_ranges)
-    data.save_norm_stats(stats, out / "norm_stats.json")
+    stats, quat_ref, keep_ranges, keep_hash = prepare_stats(
+        root, out, args.canonical_quaternion, args.keep_ranges, args.chunk, args.history,
+        args.state_delta)   # the keep-ranges file was checked in parse_args
     train_split = data.load_split("train", root=root, stats=stats, quat_ref=quat_ref,
                                   episodes=episodes_for("train", args.max_episodes, root),
                                   chunk=args.chunk, keep_ranges=keep_ranges, history=args.history)
     val = data.load_split("val", root=root, stats=stats, quat_ref=quat_ref,
                           episodes=episodes_for("val", args.max_episodes, root), chunk=args.chunk,
                           keep_ranges=keep_ranges, history=args.history)
-    # evaluation schedule: one Keras "epoch" = one check. Normal runs: a check per real epoch.
-    # --val-every N: the passes repeated endlessly, cut into checks of N batches (shuffle
-    # order: see below); --epochs/--patience/--vis-every converted from real epochs
-    batches_per_epoch = int(np.ceil(len(train_split["pair_index"]) / args.batch_size))
-    if args.val_every:
-        batches_per_check = args.val_every
-        max_checks, patience_checks, vis_every_checks = (
-            checks(x, batches_per_epoch, args.val_every)
-            for x in (args.epochs, args.patience, args.vis_every))
-        print(f"--val-every {args.val_every}: {batches_per_epoch} batches per epoch -> "
-              f"{max_checks} checks max (= {args.epochs} epochs), patience {patience_checks} "
-              f"checks (= {args.patience} epochs), timeline every {vis_every_checks} checks")
-    else:
-        batches_per_check = batches_per_epoch
-        max_checks, patience_checks, vis_every_checks = args.epochs, args.patience, args.vis_every
+    # evaluation schedule: one Keras "epoch" = one check (run_config.check_schedule; shuffle
+    # order: see below)
+    schedule = check_schedule(len(train_split["pair_index"]), args.batch_size, args.epochs,
+                              args.patience, args.vis_every, args.val_every)
+    batches_per_epoch, batches_per_check, max_checks, patience_checks, vis_every_checks = (
+        schedule[k] for k in ("batches_per_epoch", "batches_per_check", "max_checks",
+                              "patience_checks", "vis_every_checks"))
     # shuffle order: every new iterator draws the next reshuffle. Normal epochs: Keras 3.15
     # creates two iterators between epochs and uses only the second (shuffles #1, #3, #5...,
     # "keras_epochs"); .repeat() uses every one (#1, #2, #3..., "repeat"). So epoch 1 is

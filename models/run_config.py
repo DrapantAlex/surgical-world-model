@@ -2,15 +2,19 @@
 Rebuilding: the backward-compatible readers of config.json (older runs lack newer keys and
 get the value they were trained with), the run's own files (quaternion reference, keep
 ranges) and build_model. Records: git_commit (saved in config.json) and save_json.
-Shared by scripts/train.py (training and --eval-only), scripts/train_state_only.py and the
-analysis scripts that reload saved weights. Moved here from scripts/train.py on 2026-11-19
-(refactor steps 3 and 4a), unchanged.
+Setting up a new run: prepare_stats (the training-only statistics) and check_schedule
+(--val-every). Shared by scripts/train.py (training and --eval-only),
+scripts/train_state_only.py and the analysis scripts that reload saved weights. Moved here
+from scripts/train.py on 2026-11-19 (refactor steps 3 and 4a) and 2026-11-23 (section E),
+unchanged.
 """
 import json
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
+import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 
@@ -21,6 +25,8 @@ from models.simple_world_model.swm import build_actor_world_model
 # the action weight is fixed; the two world-model weights are only the DEFAULTS of
 # --w-next-state / --w-next-image (and the values of runs saved before those options)
 LOSS_WEIGHTS = {"action_output": 1.0, "next_state_output": 1.0, "next_image_output": 0.1}
+DELTA_FLOOR_C = 0.25   # --state-delta: scale = max(median|Δ|, DELTA_FLOOR_C * mean|Δ|) per dim
+CHUNK_FLOOR_C = 0.25   # --chunk: scale = max(median, CHUNK_FLOOR_C * mean) of each group's offset norm
 OUTPUTS = Path("outputs")
 REPO = Path(__file__).resolve().parents[1]   # models/run_config.py -> the repo root
 
@@ -150,3 +156,64 @@ def git_commit():
 
 def save_json(obj, path):
     Path(path).write_text(json.dumps(obj, indent=2))
+
+
+# --- E: setting up a new run: its statistics and its evaluation schedule ---
+# Moved here from scripts/train.py on 2026-11-23 (shared with scripts/train_state_only.py), unchanged.
+def prepare_stats(root, out, canonical_quaternion=False, keep_ranges_path=None, chunk=None,
+                  history=False, state_delta=False):
+    """The run's training-only statistics, saved in the run folder `out`; never the test split.
+    compute_norm_stats raises if the train split is incomplete: no fallback here.
+    Returns (stats, quat_ref, keep_ranges, keep_hash); quat_ref / keep_ranges / keep_hash are
+    None when the option is off."""
+    root = Path(root)
+    train_eps, _ = data.drop_missing_videos("train", data.get_split_episodes("train", root),
+                                            root=root, verbose=False)
+    # optional keep ranges: copied into the run (eval-only reads the copy, checked by hash);
+    # used for every statistic below AND both splits' pairs
+    keep_ranges, keep_hash = None, None
+    if keep_ranges_path:
+        shutil.copyfile(keep_ranges_path, out / "keep_ranges.csv")
+        keep_hash = data.file_sha256(out / "keep_ranges.csv")
+        keep_ranges = data.load_keep_ranges(out / "keep_ranges.csv")   # checked by the caller
+    # optional canonical quaternion signs: reference from the full train split, saved
+    # with the run, and used for the stats AND both splits (all through load_table)
+    quat_ref = None
+    if canonical_quaternion:
+        quat_ref = data.compute_quat_reference(train_eps, root, keep_ranges)
+        data.save_quat_reference(quat_ref, out / "quat_reference.json")
+    stats = data.compute_norm_stats(train_eps, root, quat_ref, keep_ranges)
+    if state_delta:   # E7: Δ scale from the full train split, like the norm stats
+        stats["state_delta"] = data.compute_delta_scale(train_eps, root, quat_ref, DELTA_FLOOR_C,
+                                                        keep_ranges)
+    if chunk:   # E8: option-C chunk scale from the full train split, like the norm stats
+        stats["action_chunk"] = data.compute_chunk_scale(train_eps, root, quat_ref, chunk,
+                                                         CHUNK_FLOOR_C, keep_ranges)
+    if history:   # history: per-dim std of h(t) over the full train split's pairs
+        stats["history_scale"] = data.compute_history_scale(train_eps, root, stats, quat_ref,
+                                                            chunk, keep_ranges)
+    data.save_norm_stats(stats, out / "norm_stats.json")
+    return stats, quat_ref, keep_ranges, keep_hash
+
+def checks(x_epochs, batches_per_epoch, val_every):
+    """--val-every: a count in real epochs -> the number of checks (N batches each) it spans."""
+    return int(np.ceil(x_epochs * batches_per_epoch / val_every))
+
+def check_schedule(n_train_pairs, batch_size, epochs, patience, vis_every, val_every=None):
+    """Evaluation schedule: one Keras "epoch" = one check. Normal runs: a check per real epoch.
+    --val-every N: the passes repeated endlessly, cut into checks of N batches;
+    --epochs/--patience/--vis-every converted from real epochs."""
+    batches_per_epoch = int(np.ceil(n_train_pairs / batch_size))
+    if val_every:
+        batches_per_check = val_every
+        max_checks, patience_checks, vis_every_checks = (
+            checks(x, batches_per_epoch, val_every) for x in (epochs, patience, vis_every))
+        print(f"--val-every {val_every}: {batches_per_epoch} batches per epoch -> "
+              f"{max_checks} checks max (= {epochs} epochs), patience {patience_checks} "
+              f"checks (= {patience} epochs), timeline every {vis_every_checks} checks")
+    else:
+        batches_per_check = batches_per_epoch
+        max_checks, patience_checks, vis_every_checks = epochs, patience, vis_every
+    return {"batches_per_epoch": batches_per_epoch, "batches_per_check": batches_per_check,
+            "max_checks": max_checks, "patience_checks": patience_checks,
+            "vis_every_checks": vis_every_checks}
