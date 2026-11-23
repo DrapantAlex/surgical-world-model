@@ -43,6 +43,16 @@ def copy_frame_mse(split, chunk=256):
         image.update(inputs["image_input"], targets["next_image_output"])
     return image.result()
 
+def wm_balance_references(train_split, state_dims):
+    """NEW (c): the copy references the balanced WM losses are divided by (--wm-balance), from
+    the TRAIN split's pairs: the image MSE of copy_frame and the state MSE of copy_state over
+    `state_dims` only (the mean of the per-dim values: every dim has the same number of pairs).
+    The same functions as the val reference lines, so 1.0 means "as good as copying"."""
+    return {"image_copy_mse": copy_frame_mse(train_split),
+            "state_copy_mse": float(np.mean(copy_state_mse_per_dim(train_split)[state_dims])),
+            "state_dims": [int(d) for d in state_dims],
+            "n_pairs": int(len(train_split["pair_index"]))}
+
 def constvel_state(split, keep_ranges):
     """Constant velocity s(t) + (s(t) - s(t-1)) for every pair (normalised units); copy (Δ = 0)
     where s(t-1) is not available (data.prev_in_window). Returns (prediction, n_fallback_pairs)."""

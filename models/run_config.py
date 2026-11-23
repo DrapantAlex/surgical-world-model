@@ -82,6 +82,10 @@ def run_history(cfg):
     """History inputs on? Runs saved before --history: off."""
     return cfg.get("history", False)
 
+def run_wm_balance(cfg):
+    """NEW (c): the target share ρ of --wm-balance, or None (off; runs saved before the option)."""
+    return cfg.get("wm_balance")
+
 
 # --- C: model, losses and metrics as compiled for training ---
 def scaled_huber(factor):
@@ -161,11 +165,14 @@ def save_json(obj, path):
 # --- E: setting up a new run: its statistics and its evaluation schedule ---
 # Moved here from scripts/train.py on 2026-11-23 (shared with scripts/train_state_only.py), unchanged.
 def prepare_stats(root, out, canonical_quaternion=False, keep_ranges_path=None, chunk=None,
-                  history=False, state_delta=False):
+                  history=False, state_delta=False, wm_balance_groups=None):
     """The run's training-only statistics, saved in the run folder `out`; never the test split.
     compute_norm_stats raises if the train split is incomplete: no fallback here.
     Returns (stats, quat_ref, keep_ranges, keep_hash); quat_ref / keep_ranges / keep_hash are
-    None when the option is off."""
+    None when the option is off.
+    NEW (c) wm_balance_groups = [state group names] (--wm-balance): + stats["wm_balance"], the
+    copy references of the balanced WM losses, from the FULL train split's pairs with frames
+    (memory-mapped cache, also in smoke runs, like the norm stats; ≈ 2 min on STAR-IL)."""
     root = Path(root)
     train_eps, _ = data.drop_missing_videos("train", data.get_split_episodes("train", root),
                                             root=root, verbose=False)
@@ -192,6 +199,18 @@ def prepare_stats(root, out, canonical_quaternion=False, keep_ranges_path=None, 
     if history:   # history: per-dim std of h(t) over the full train split's pairs
         stats["history_scale"] = data.compute_history_scale(train_eps, root, stats, quat_ref,
                                                             chunk, keep_ranges)
+    if wm_balance_groups:   # NEW (c): copy references for the balanced WM losses
+        # imported here: models/references.py imports metric_name from this module
+        from models.references import wm_balance_references
+        groups = data.state_groups(data.feature_names(root)[0])
+        dims = sorted(d for g in wm_balance_groups for d in groups[g])
+        train_full = data.load_split("train", root=root, stats=stats, quat_ref=quat_ref,
+                                     episodes=train_eps, chunk=chunk, keep_ranges=keep_ranges)
+        stats["wm_balance"] = {"state_groups": list(wm_balance_groups),
+                               **wm_balance_references(train_full, dims)}
+        del train_full
+        print(f"--wm-balance references (train): copy_frame {stats['wm_balance']['image_copy_mse']:.6g}, "
+              f"copy_state on {wm_balance_groups} {stats['wm_balance']['state_copy_mse']:.6g}")
     data.save_norm_stats(stats, out / "norm_stats.json")
     return stats, quat_ref, keep_ranges, keep_hash
 

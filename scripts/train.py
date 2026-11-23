@@ -80,10 +80,25 @@ def parse_args():
     p.add_argument("--canonical-quaternion", action="store_true",
                    help="flip every quaternion label to the sign of the train mean rotation "
                         "(saved as quat_reference.json); off = the dataset's own signs")
-    p.add_argument("--w-next-state", type=float, default=LOSS_WEIGHTS["next_state_output"],
-                   help="loss weight of the next-state head (0 = no gradient from it)")
-    p.add_argument("--w-next-image", type=float, default=LOSS_WEIGHTS["next_image_output"],
-                   help="loss weight of the next-image head (0 = no gradient from it)")
+    # default None = "not given" (needed to reject them with --wm-balance); filled with the
+    # LOSS_WEIGHTS values right after parsing, so config.json stores the same numbers as before
+    p.add_argument("--w-next-state", type=float, default=None,
+                   help="loss weight of the next-state head (0 = no gradient from it; "
+                        f"default {LOSS_WEIGHTS['next_state_output']})")
+    p.add_argument("--w-next-image", type=float, default=None,
+                   help="loss weight of the next-image head (0 = no gradient from it; "
+                        f"default {LOSS_WEIGHTS['next_image_output']})")
+    # NEW (c): balanced WM losses (replaces the fixed --w-next-* weights)
+    p.add_argument("--wm-balance", type=float, default=None, metavar="RHO",
+                   help="(c): WM losses ÷ their train copy references, and each WM term's weight "
+                        "adapted so its push on the encoder stays at RHO x the actor's (off by default)")
+    p.add_argument("--wm-balance-terms", type=lambda v: v.split(","), default=["image", "state"],
+                   help="(c): the balanced WM terms, comma-separated (the others get weight 0)")
+    p.add_argument("--wm-state-groups", type=lambda v: v.split(","), default=None,
+                   help="(c): state groups (data.state_groups) in the balanced state loss, "
+                        "comma-separated; default: all (STAR-IL: kuka_joint_pos)")
+    p.add_argument("--wm-balance-every", type=int, default=10,
+                   help="(c): measure the pushes and update the weights every N training steps")
     p.add_argument("--state-delta", action="store_true",
                    help="E7: state head predicts the change f, next_state = state + f (skip); "
                         "loss = Huber on Δ / scale (scale saved in norm_stats.json)")
@@ -120,6 +135,32 @@ def parse_args():
         p.error("--unfreeze-last-n needs --freeze-encoder")
     if args.eval_only and not args.run_name:
         p.error("--eval-only needs --run-name")
+    # NEW (c): --wm-balance sets the WM weights itself; its options only make sense with it
+    if args.wm_balance is not None:
+        if args.w_next_state is not None or args.w_next_image is not None:
+            p.error("--wm-balance adapts the WM weights itself: drop --w-next-state / --w-next-image")
+        if args.wm_balance <= 0:
+            p.error("--wm-balance must be > 0 (to switch the WM off: --w-next-state 0 --w-next-image 0)")
+        if args.state_delta:
+            p.error("--wm-balance uses the MSE state loss: not with --state-delta (E7)")
+        if not args.wm_balance_terms or set(args.wm_balance_terms) - {"image", "state"}:
+            p.error(f"--wm-balance-terms: a subset of image,state, got {args.wm_balance_terms}")
+        if args.wm_balance_every < 1:
+            p.error("--wm-balance-every must be >= 1")
+        groups = data.state_groups(data.feature_names(Path(args.dataset_root))[0])
+        if args.wm_state_groups is None:
+            args.wm_state_groups = list(groups)
+        unknown = set(args.wm_state_groups) - set(groups)
+        if unknown:
+            p.error(f"--wm-state-groups: {sorted(unknown)} not in this dataset's groups {list(groups)}")
+        if not args.eval_only:   # REMOVED in the next commit, with the balancing train_step
+            p.error("--wm-balance: the balancing train_step comes in the next commit")
+    elif args.wm_state_groups is not None:
+        p.error("--wm-state-groups needs --wm-balance")
+    if args.w_next_state is None:
+        args.w_next_state = LOSS_WEIGHTS["next_state_output"]
+    if args.w_next_image is None:
+        args.w_next_image = LOSS_WEIGHTS["next_image_output"]
     if args.w_next_state < 0 or args.w_next_image < 0:
         p.error("loss weights must be >= 0")
     if args.val_every is not None and args.val_every <= 0:
@@ -171,7 +212,8 @@ def train(args):
     root = Path(args.dataset_root)
     stats, quat_ref, keep_ranges, keep_hash = prepare_stats(
         root, out, args.canonical_quaternion, args.keep_ranges, args.chunk, args.history,
-        args.state_delta)   # the keep-ranges file was checked in parse_args
+        args.state_delta,   # the keep-ranges file was checked in parse_args
+        wm_balance_groups=args.wm_state_groups if args.wm_balance else None)   # NEW (c)
     train_split = data.load_split("train", root=root, stats=stats, quat_ref=quat_ref,
                                   episodes=episodes_for("train", args.max_episodes, root),
                                   chunk=args.chunk, keep_ranges=keep_ranges, history=args.history)

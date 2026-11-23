@@ -30,6 +30,7 @@ Moved here from `scripts/` on 2026-11-19; diary entries before that date use the
 | `look_chunk_baselines.py` | E8: no-learning chunk predictors on val, before training | diary 10-29, E8 decision (not cited by name) |
 | `look_delta_predictability.py` | E7 D2: can the one-frame state change be predicted without the image? | diary 10-29; `experiment-comparison.md` §5 |
 | `look_delta_reference.py` | E7 D1: reference losses of the Δ head on train and val | diary 10-29 |
+| `look_encoder_gradients.py` | Encoder gradients of the actor, state and image losses (norms, weighted ratios, cosines, per layer) on 20 val + 20 train batches, best weights and untrained; checks that the weighted terms sum to the compiled loss's gradient (TF32 off) → `outputs/analysis/encoder_gradients/` | — (WM gradient share, 11-23; diary entry to come) |
 | `look_endo360.py` | endo360 checks 1–3: glitches, sample-and-hold, share of the error | diary 11-17 |
 | `look_frame_difference.py` | From which gap k does frame t − k clearly differ from frame t? | — (output in `outputs/analysis/frame_difference/`) |
 | `look_history_ablation.py` | History inputs: best weights of the `--history` runs evaluated with Δs, Δa or both zeroed (GPU; "full" vs `val_metrics.json` within 1e-4 relative) → `outputs/analysis/history_ablation/` | 11-20 (history experiment: which half of h(t) the actor uses) |
