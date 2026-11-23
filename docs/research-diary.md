@@ -1076,3 +1076,127 @@ K = 1 is run 1a-val500 (checks every 500 batches, the same batch counts read off
 - `check_wm_off_gradient` had been failing since E7 (`build_model` gained a `stats` argument in `6dd76b3`); fixed by passing `stats=None`. Re-run with today's code: same result as for E6 (weights 1, 0, 0: largest gradient difference 0.0 over 28 variables; control 1, 1, 0.1: 24 of 28 differ).
 - `dataset_root` bug, since 2026-10-16: the four oldest STAR-IL runs (`star-il-simplecnn-latent512-seed0` = E1 and `…-canonq-seed0/1/2`) saved an absolute `dataset_root`, every other run and `baselines.json` a relative one, and `Path` equality compares the spelling. Effects: the E1 `--eval-only` table never showed the baseline columns, and reloading one of those runs rebuilt the val frame cache (and the next relative run rebuilt it back). No metric was wrong. Fix: `run_config.dataset_root` returns the repo-relative path for an absolute path inside the repo; E1 now shows its baselines, its 37 re-evaluated metrics are identical, and E1 → 1c → E1 rebuilds nothing.
 - `check_orientation_error` and `look_static_vs_moving` had also been failing since E7 (same `build_model` signature change, `6dd76b3`); fixed by passing the run's own statistics (`build_model(cfg, stats)`; E7 runs need them). Quick runs on E1 / the E1-E2-E6 runs: `look_static_vs_moving` identical to its 10-27 quick-test CSVs; `check_orientation_error` within about 1e-4 relative of its 10-20 quick-test file (older script version and code, not the fix). E1's full `check_orientation_error.json` (10-21) predates `pos_err_raw`, so `compare_runs` needs it re-run.
+
+---
+
+## 2026-11-23
+
+Tags: **[M]** = measured on my files, **[H]** = hypothesis (not tested).
+
+Reference ("history runs"): `star-il-simplecnn-latent512-canonq-chunk16-trim-skip-hist-val1000-seed{0,1,2}` (11-20, `fda6107`): full model, chunk 16, trimmed, `--state-skip`, `--history`, `--val-every 1000`. Best val actor loss **0.556× stand-still**.
+
+### Today in five lines
+
+- **B (state-only actor + history): 0.501× stand-still** [0.5007, 0.5015] vs 0.556× [0.548, 0.566] for the full model: **−10%, the seed ranges don't overlap**, and B is better at every chunk step in mm and in degrees. [M]
+- B barely memorises: train/val gap 0.05 at the end (full model: 0.73); best check after 26.7 epochs (full model: 1.6). [M]
+- **WM off: 0.5564× vs 0.5564× with the WM on.** Same best check, same curves, same memorisation: the WM has no measurable effect on the actor. [M]
+- Why: the WM losses are **≈ 0.1% of the total loss** (image 0.00023, state 0.00015, actor ≈ 0.46). In this setup "WM on" was effectively "WM off". [M for the losses; H that the encoder gradients are just as small]
+- Both results **replicate E2 and E6 (10-21/22) in the new setup** (relative chunks, history, trimmed). The 10 % gap comes from the image path, not the WM. Information or capacity is still open.
+
+### Code (two commits)
+
+**Commit 1 (`c759cec`): refactor, no number changed**
+
+| What was modified | Why | What it does |
+|---|---|---|
+| `prepare_stats`, `check_schedule`, `checks`, `DELTA_FLOOR_C`, `CHUNK_FLOOR_C` moved from `scripts/train.py` to `models/run_config.py` (section E) | B must use exactly the same statistics and `--val-every` schedule as train.py, without a copy | One source for the run statistics (keep ranges, quaternion reference, norm stats, Δ / chunk / history scales) and for the schedule. Checked: `check_eval_unchanged compare pre-refactor` UNCHANGED; smoke `norm_stats.json` byte-identical to an older smoke run |
+
+**Commit 2 (`e6ee6b5`): state-only actor for B**
+
+| What was modified | Why | What it does |
+|---|---|---|
+| `build_state_only_actor(..., action_chunk, history_dim)` | The history runs' actor, minus the image and the WM | concat(s(t), h(t)) → Dense(256, relu) → Dense(16·7) → Reshape((16, 7)), the same order and names as `swm.py`. **34,928 parameters** (full model: 71,989,115). Defaults = the old E2 graph (4,103 parameters; old E2 weights reload with difference 0.0) |
+| `train_state_only.py`: `--chunk`, `--history`, `--keep-ranges`, `--val-every` | Same setup as train.py | Same statistics, pairs, targets, reference lines, exact per-pair Huber and final chunk metrics as train.py; frames never loaded |
+| `AliasLogs` (new mode only) | A one-output Keras model logs `loss` / `huber`, without the `action_output_` prefix | Also logs `(val_)action_output_loss` / `_huber`, so the W&B panels are the same as train.py's. Old E2 columns unchanged |
+
+Checks for B (GPU) [M]:
+- `norm_stats.json` (including `history_scale` and `action_chunk`) is **byte-identical** to the history run's.
+- The reference lines are bit-identical: stand-still 0.7795, train-mean 0.7785, constant velocity 0.9239.
+- Pairs 146,609 / 17,692, Δa fallbacks 305 / 45.
+- On CPU, stand-still and train-mean differ by 1 float32 ULP (6·10⁻⁸): the device changes the summation order of Keras' Huber. Reference lines must be compared on the same device.
+
+`check_orientation_error` is skipped for chunk runs (not chunk-aware yet). So there is no episode bootstrap or paired test for today's comparisons yet: 3 seeds per arm, and the ranges do not overlap.
+
+### B: my five lines and outcomes
+
+| | | Outcome |
+|---|---|---|
+| Question | Does the image add anything to the actor once it has the history? | **No, it costs ≈ 10%.** [M] |
+| Hypothesis | (from the history ablation) the image adds no usable information yet; in the full model it mostly adds memorisation capacity | **Supported, and stronger than expected:** without the image the actor is better, and the memorisation is almost gone. [M] Whether the cause is information or capacity is still open. |
+| Prediction | ≈ the same level (≈ 0.556× stand-still), memorises later or less | **Level: wrong** (0.501×). **Memorisation: confirmed**, much later and much less. [M] |
+| Surprise | Clearly worse (the image adds information, e.g. the task phase), or clearly better (the image hurts) | **"Clearly better" branch.** [M] |
+| Change | No image, no WM; the actor head on s(t) + h(t) only; everything else as in the history runs | **Holds:** same statistics, pairs and reference lines (checked bitwise). [M] |
+
+### B and WM off: results
+
+3 seeds each, trimmed val (17,692 pairs), `--val-every 1000`; mean [min, max]. WM off = the history runs with `--w-next-state 0 --w-next-image 0` (`e6ee6b5`, only these two config keys differ). [M]
+
+| | full, WM on | full, WM off | **B: state-only** |
+|---|---|---|---|
+| parameters | 72.0 M | 72.0 M | 34,928 |
+| **best val ÷ stand-still** | 0.5564 [0.548, 0.566] | 0.5564 [0.550, 0.561] | **0.5011** [0.5007, 0.5015] |
+| best val ÷ constant velocity | 0.470 | 0.470 | 0.423 |
+| best check (epochs) | 7.3 (1.6) | 7.3 (1.6) | 122 (26.7) |
+| train ÷ stand-still at the best check | 0.518 | 0.518 | 0.464 |
+| train / val ÷ stand-still at the end | 0.218 / 0.960 | 0.214 / 0.952 | 0.460 / 0.505 |
+| training time | ≈ 50 min | ≈ 48 min | ≈ 5 min |
+
+Per chunk step (best weights):
+
+| step | full WM on: mm / ° | full WM off: mm / ° | B: mm / ° | stand-still: mm / ° |
+|---|---|---|---|---|
+| 1 | 0.112 / 0.0323 | 0.113 / 0.0323 | **0.092 / 0.0171** | 0.390 / 0.089 |
+| 8 | 1.490 / 0.396 | 1.491 / 0.397 | **1.394 / 0.366** | 2.711 / 0.539 |
+| 16 | 3.052 / 0.793 | 3.045 / 0.793 | **2.924 / 0.741** | 4.837 / 0.982 |
+
+Train vs val over training (seed means, ÷ stand-still):
+
+| epochs seen | full, WM on: val / train | B: val / train |
+|---|---|---|
+| 0.44 | 0.611 / 0.608 | 0.589 / 0.589 |
+| 1.53 | **0.561** / 0.522 | 0.541 / 0.526 |
+| 4.58 | 0.745 / 0.386 | 0.519 / 0.496 |
+| 10.0 | 0.949 / 0.244 | 0.508 / 0.484 |
+
+- **B is ahead from the 2nd check on:** better at the same number of batches, not only because it trains longer. [M]
+- **The largest gain is step-1 rotation (−47%).** Near t the action is mostly forward kinematics of s(t) plus the last command change. The image path adds noise there. [M; the reason is H]
+- **At its best check the full model hasn't even fitted train as well as B** (0.518 vs 0.464). Val turns up before the full model has learned what s(t) + h(t) already give. This looks like a shortcut (memorising episodes by their look), not like late overfitting of a converged model. [H]
+- **WM on = WM off at every check:** check 1 agrees to 4 decimals in the seed mean, and the per-seed curves differ only in the 3rd–4th decimal. So the WM gradient does reach the encoder (no `stop_gradient`, `swm.py` C), but its effect is negligible. [M]
+
+### Why the WM does nothing: the loss magnitudes
+
+| loss term (val, at the best check) | value × weight | share of the total |
+|---|---|---|
+| actor Huber | ≈ 0.46 × 1.0 | ≈ 99.9% |
+| next image MSE | ≈ 0.0023 × 0.1 | ≈ 0.05% |
+| next state MSE | ≈ 0.00015 × 1.0 | ≈ 0.03% |
+
+- The weights 1.0 / 1.0 / 0.1 come from the Open-X reference. Here the loss *magnitudes* differ by three orders, so the weights don't balance anything. [M]
+- What the WM learns: image 0.011 → 0.0023, still ≈ 4× worse than copy_frame (0.00059). State 0.00014–0.00016 ≈ copy_state (0.000156). [M]
+- With the WM off, its heads stay at their start values: image 0.102; state exactly copy_state, since the state skip is zero-initialised. [M]
+- Loss share ≠ gradient share on the encoder: the gradient also depends on how steep each loss is. "The WM gradient on the encoder is negligible" is still **[H]** (consistent with the identical curves, not measured).
+
+### What it means
+
+- **Replication.** E2 (10-21: state-only better, train/val gap ×7 vs ×2) and E6 (10-22: WM off = WM on) hold in the new setup too. That setup has relative chunks, history and trimming, plus a check every 1,000 batches. [M]
+- **E2's explanation no longer covers it.** In October: "the target is an absolute pose ≈ FK(angles), so the image isn't needed". The relative chunks were meant to force the actor to use the scene (10-21, next steps). With relative chunks + history, **the image still adds no usable information**; it costs ≈ 10% and drives the memorisation. [M]
+- **Three explanations for B's lead:**
+  1. Information: the image enables a shortcut, memorising episodes by their look. [H]
+  2. The WM shapes the encoder against the actor: **ruled out** by WM off. [M]
+  3. Capacity and optimisation: 72 M vs 35 k parameters with the same Adam 3e-4. [H]
+- **For the thesis.** The product is encoder + actor, and right now the encoder makes it worse than no encoder. The premise "the WM as an auxiliary task shapes the encoder" **has not been tested yet**: at these loss scales the WM barely acts. E6 = E1 was not "the WM doesn't help", but "the WM wasn't really on". [M for the scales; the conclusion follows from them]
+
+### Corrections
+
+- 10-22, E6: "expected, because the image isn't needed (E2), so a loss that shapes the image encoder can't help". This is incomplete. A WM loss ≈ 0.1% of the total can't shape anything, whatever the task. [M]
+- 10-22, E7 motivation: "copy is almost perfect, so the WM had nothing to learn" was half of it. The other half is that the absolute loss is tiny next to the actor loss, so even a WM that learns has almost no weight. [M]
+
+### Next steps
+
+- [x] B: state-only + history, 3 seeds.
+- [x] WM off with history, 3 seeds.
+- [ ] Gradient norms on the encoder: ‖∇L_actor‖ vs ‖∇L_image‖ vs ‖∇L_state‖, on the saved best weights, about 20 val batches (`look_*`). This turns the [H] above into [M].
+- [ ] History model with a zero / constant image: the same 72 M capacity without image information. Separates explanation 1 from 3.
+- [ ] A WM that actually acts: balance the WM losses to the actor (e.g. normalise by copy_frame / copy_state, or larger weights). Does it shrink the 0.73 memorisation gap? Design options to be written up before any code.
+- [ ] Step (1), paused: `check_orientation_error` for chunk runs, so that `compare_runs` gives the episode bootstrap CI and the paired test for B vs history.
+- [ ] Ask Michael: is "state-only + history = 0.50× stand-still" the bar the encoder must beat from now on?
