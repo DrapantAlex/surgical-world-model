@@ -1079,6 +1079,94 @@ K = 1 is run 1a-val500 (checks every 500 batches, the same batch counts read off
 
 ---
 
+## 2026-11-20
+
+Tags: **[M]** = measured on my files, **[H]** = hypothesis (not tested).
+
+### Today in five lines
+
+- **History inputs h(t) = [Δs(t), Δa(t−1)] move the actor from ≈ 1.00× to 0.556× stand-still** [0.548, 0.566], 3 seeds. Without history, five step-1 runs (1a / 1b / 1c, 11-16 to 11-18) all had their best check at the first check, at stand-still. [M]
+- **The actor uses almost only Δs(t), the last state change.** Zeroing Δs → 0.916×; zeroing Δa → 0.611×; zeroing both → 1.019× (= stand-still). [M]
+- It beats constant velocity on the commands (1.185× stand-still) by far: the history is used as an input, not copied as a rule. [M]
+- **The WM state head beats copy_state for the first time:** 159 of 160 checks below copy (without history: 0 of 281). KUKA 0.14–0.19× copy, but still worse than constant velocity (0.107×). [M]
+- The actor still memorises from ≈ 1.5 epochs on (best check 7–8 of 53; train/val gap 0.73 at the end). Next: does the image add anything once the history is there? → experiment B (11-23).
+
+### Code (three commits + one refactor)
+
+| Commit | What was modified | Why | What it does |
+|---|---|---|---|
+| `8e07a35` | `CheckMonitor`, `timeline_callback` → `models/callbacks.py` | Refactor (train.py keeps no callbacks) | Unchanged; `CheckMonitor` gets the monitored name as an argument. History columns identical to the earlier smoke run |
+| `82c1b15` | `val_action_output_loss_constvel` reference line | The bar for "uses the last command change": the rule offset_i = (i+1)·(a(t−1) − a(t−2)) | Logged next to stand-still and train-mean, through the same `chunk_baselines` functions as `chunk_baselines.json` (so they always agree). **0.9239 = 1.185× stand-still:** extrapolating the last command change is *worse* than standing still |
+| `fda6107` | `--history` (data.py D3, `swm.py`, pipeline, train) | 1a–1c: without history, neither branch got past "nothing changes" | h(t) = [s_n(t) − s_n(t−1), a_n(t−1) − a_n(t−2)], normalised units, each dim ÷ its train std (`history_scale` in `norm_stats.json`), **no mean subtracted**, so 0 still means "no change" |
+| `5e58cba` | `scripts/analysis/look_history_ablation.py` | Which half of h(t) do the trained models use? | Eval-only: the best weights with Δs, Δa or both zeroed, through the same `evaluate()`; "full" reproduces `val_metrics.json` within 1e-4 relative (GPU) |
+
+Design choices in `--history` [M: from the code]:
+- **Both branches** get h(t), appended *last* to the actor's and the WM's concat. No new layer: the first actor Dense, the first state-head Dense and the latent Dense get 15 more input rows. Since Glorot's limit depends on fan-in, these three kernels start different from 1a; every other weight starts identical.
+- **The fallback is 0 ("change unknown"), with each change following the rule of its own reference line:**
+  - Δs uses `prev_in_window`, the rule of constant-velocity state.
+  - Δa uses `chunk_anchors`, the rule of constant-velocity Huber.
+  - Fallbacks: Δs 0 / 0 pairs (train / val), Δa 305 / 45 (the t = 1 pairs, where a(t−2) is not in the episode).
+- The scale is the std over the *real* changes only (fallback zeros excluded), ddof = 0 like `compute_norm_stats`. Parameters: 71,989,115 (1a: 71,975,675; +13,440 = 15 rows × (512 + 256 + 128)).
+
+### My five lines and outcomes
+
+<!-- TODO(human): my five lines as written BEFORE the runs (question, hypothesis, prediction, surprise, change), each with its outcome from the results below, in the format of 11-17 ("Step 1b: my five lines and outcomes"). -->
+
+### Results
+
+Trimmed val (17,692 pairs), `--val-every 1000`, best weights chosen by the actor loss. History: 3 seeds (`star-il-simplecnn-latent512-canonq-chunk16-trim-skip-hist-val1000-seed{0,1,2}`, ≈ 50 min each). Without history: the step-1 runs, seed 0 each (1a `skip-val500`, 1b `sl2` / `sl3`, 1c `mix1` / `mix3`). [M]
+
+| | without history (5 runs) | **with history** (3 seeds) |
+|---|---|---|
+| **best val ÷ stand-still** | 0.999–1.002 | **0.556** [0.548, 0.566] |
+| best check | 1 (batch 500 / 1,000), every run | 7–8 of 53 (1.5–1.7 epochs) |
+| step 1: mm / ° | 0.39 / 0.089 (= stand-still) | **0.112 / 0.032** |
+| step 8: mm / ° | 2.72 / 0.54 | **1.49 / 0.40** |
+| step 16: mm / ° | 4.86 / 0.99 | **3.05 / 0.79** |
+| WM state ÷ copy, checks below copy | 1.000–1.008, **0 / 281** | 0.75–0.80, **159 / 160** |
+
+The no-history arm is five different variants with one seed each, not three seeds of one configuration. But all five are at stand-still at their best check, so the gap of 0.44× stand-still is far beyond any seed spread. [M]
+
+### Which half of h(t) does the actor use? (`look_history_ablation`)
+
+Best weights of the 3 history seeds, nothing retrained; Huber ÷ the stand-still value of the same step; mean of 3 seeds (all three seeds within ±0.01). [M]
+
+| val history input | total | step 1 | step 16 | mm (mean) | ° (mean) |
+|---|---|---|---|---|---|
+| full | **0.557** | 0.258 | 0.670 | 1.57 | 0.42 |
+| Δs = 0 | 0.916 | 0.930 | 0.911 | 2.62 | 0.53 |
+| Δa = 0 | 0.611 | 0.284 | 0.727 | 1.67 | 0.44 |
+| both = 0 | 1.019 | 1.015 | 1.020 | 2.83 | 0.58 |
+| *stand-still* | *1* | *1* | *1* | *2.76* | *0.56* |
+
+- **Δs carries most of it:** without it the gain drops from 0.44 to 0.08. Without Δa it drops only to 0.39. [M]
+- **Step 1 is almost entirely Δs** (0.26 → 0.93). The current joint velocity tells where the commanded pose goes next. [M; the reason is H]
+- **Both zeroed = stand-still exactly.** The image + s(t) path adds nothing the actor can use on val. [M] This was the reason for experiment B (11-23).
+- Caveat: zeroing is not removing. Δs = 0 also means "the robot stands still", which the model has seen in training. So a drop measures how much the model *relies* on the input, an upper bound on what it gets from it.
+
+### World model with history
+
+- **State, KUKA arm:** 0.14 / 0.18 / 0.19× copy (seeds 0 / 1 / 2), while constant velocity is 0.107×. The WM now uses the history, but it is still 1.3–1.8× worse than the plain rule "repeat the last change". [M]
+- **State, endo360:** 0.79–0.84× copy, the first time below copy. endo360 is 82–94% of the state error (11-17), so it drives the overall 0.75–0.80. **[H]:** endo360 moves in runs of single ticks with gap 1 most often (11-17, check 2), so its last change partly predicts the next one.
+- **Image:** 0.0032–0.0035, still ≈ 5.5× worse than copy_frame (0.00059). [M]
+- These WM values are at the *actor's* best check (MONITOR), not at the WM's own best.
+
+### What it means
+
+- **1a–1c were not failing on the architecture, but on missing information.** With one frame and one state, neither branch could know the current velocity. With h(t) both branches use it, from the first checks on. [M for the curves; H for the general reading]
+- **The actor's information is almost all in s(t) + Δs(t).** Neither the image nor Δa adds much on val. This is the E2 pattern again (10-21), now with relative chunks: the scene is not used. [M]
+- **The actor learns more than the rule.** Constant velocity on the commands is *worse* than stand-still (1.185×), while the model reaches 0.556×. It uses Δs as an input, not as an extrapolation. [M]
+- **The memorisation is unchanged.** Train goes on to 0.22× stand-still while val climbs back to 0.96×. Is it the image path that memorises? → experiment B. [H, tested 11-23]
+
+### Next steps
+
+- [x] Ablation of the two history halves (`look_history_ablation`, `5e58cba`).
+- [ ] Experiment B: state-only actor + history (no image, no WM). Does the image add anything? (done 11-23)
+- [ ] WM off with history, 3 seeds (done 11-23).
+- [ ] KUKA WM vs constant velocity: why is the WM still worse than "repeat the last change", although it gets that change as an input?
+
+---
+
 ## 2026-11-23
 
 Tags: **[M]** = measured on my files, **[H]** = hypothesis (not tested).
