@@ -47,6 +47,23 @@ class ConstantLogs(keras.callbacks.Callback):
         if logs is not None:
             logs.update(self.values)
 
+class AliasLogs(keras.callbacks.Callback):
+    """NEW (B): copies log values under a second name, for the train and val prefix:
+    {new: existing}. A one-output Keras model logs "loss" / "huber" (no output prefix), so the
+    state-only actor (scripts/train_state_only.py) also logs them as "action_output_loss" /
+    "action_output_huber", the names of scripts/train.py (same W&B panels)."""
+    def __init__(self, aliases):
+        super().__init__()
+        self.aliases = aliases
+
+    def on_epoch_end(self, epoch, logs=None):
+        if logs is None:
+            return
+        for prefix in ("", "val_"):
+            for new, old in self.aliases.items():
+                if prefix + old in logs:
+                    logs[prefix + new] = logs[prefix + old]
+
 class StateGroupLogs(keras.callbacks.Callback):
     """Adds (val_)next_state_<group>_mse = the mean of the group's per-dimension metrics
     (state_dim_metrics). Every per-dim metric averages over the same samples, so this is
