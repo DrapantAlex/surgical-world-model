@@ -78,7 +78,8 @@ The repo has no test suite and no linter. To validate a change, run the full-opt
 - `latent_dim=512` adds a bottleneck before the image decoder, giving about 72M parameters in total. `latent_dim=None` is the original decoder, with about 2.5B parameters (roughly 40 GB of GPU memory).
 - The decoder starts at img/16 and upsamples by 2 four times.
 - The experiment variants are arguments of `build_actor_world_model`, each marked `NEW (<experiment>):` in the code: `delta_factor` (E7), `action_chunk` (E8), `state_skip` (1a), `state_layers` (1b), `wm_mixer_blocks` (1c). Their defaults give the original model.
-- `models/state_only.py` is the state-only actor of E2 (no image), trained by `scripts/train_state_only.py`.
+- `models/state_only.py` is the state-only actor of E2 (no image), trained by `scripts/train_state_only.py`; with `--chunk`, `--history`, `--keep-ranges` and `--val-every` it is experiment B.
+- `models/balance.py` is experiment (c), `--wm-balance RHO`: `build_model` re-wraps the same graph as `BalancedWorldModel`, whose `train_step` divides the WM losses by train copy references and adapts their weights so each term's push on the encoder stays at RHO × the actor's. compile, `test_step` and the weight file are unchanged; the controller state is in untracked `tf.Variable`s.
 
 **Metrics and reference lines (`models/metrics.py`, `models/references.py`)**
 - `scripts/baselines.py` and `scripts/train.py` both use the metrics functions, so baselines and models are always measured the same way.

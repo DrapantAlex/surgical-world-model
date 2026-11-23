@@ -19,6 +19,7 @@ import tensorflow as tf
 from tensorflow import keras
 
 from models import data
+from models.balance import BalancedWorldModel
 from models.simple_world_model.swm import build_actor_world_model
 
 # --- A: fixed choices needed to rebuild a run ---
@@ -117,7 +118,25 @@ def state_dim_metrics(state_names):
         return fn
     return [one(i, n) for i, n in enumerate(names)]
 
-def build_model(cfg, stats):
+def balanced_model(model, cfg, stats, mode="balance", refs=None, state_dims=None):
+    """NEW (c): re-wrap the functional `model` (same layers and variables, so the same weight
+    file) as balance.BalancedWorldModel. refs / state_dims default to stats["wm_balance"];
+    `mode`, `refs` and `state_dims` are overridden only by the equivalence check."""
+    if refs is None or state_dims is None:
+        wb = stats["wm_balance"]
+        refs = refs or {"image": wb["image_copy_mse"], "state": wb["state_copy_mse"]}
+        state_dims = wb["state_dims"] if state_dims is None else state_dims
+    w = loss_weights(cfg)   # the raw history-run weights (--w-next-* are rejected with --wm-balance)
+    return BalancedWorldModel(
+        inputs=model.inputs, outputs=model.outputs, name=model.name,
+        rho=cfg["wm_balance"], balanced=cfg["wm_balance_terms"],
+        refs=refs, state_dims=state_dims,
+        raw_weights={"image": w["next_image_output"], "state": w["next_state_output"]},
+        every=cfg["wm_balance_every"], mode=mode)
+
+def build_model(cfg, stats, balance_overrides=None):
+    """balance_overrides (NEW (c)): keyword arguments for balanced_model (mode, refs,
+    state_dims); only scripts/analysis/check_wm_balance_equivalence.py passes them."""
     state_dim, action_dim = data.feature_dims(dataset_root(cfg))
     factor = delta_factor(cfg, stats)
     model = build_actor_world_model(state_dim, action_dim,
@@ -130,6 +149,8 @@ def build_model(cfg, stats):
                                     init_seed=cfg.get("seed", 0),   # 1b/1c: seeds of the extra layers
                                     wm_mixer_blocks=cfg.get("wm_mixer_blocks", 0),   # 1c; older runs: 0
                                     history_dim=state_dim + action_dim if run_history(cfg) else 0)
+    if run_wm_balance(cfg) is not None:   # NEW (c): the same graph with the balancing train_step
+        model = balanced_model(model, cfg, stats, **(balance_overrides or {}))
     model.compile(optimizer=keras.optimizers.Adam(learning_rate=cfg["lr"]),
                   loss={"action_output": keras.losses.Huber(),
                         "next_state_output": "mse" if factor is None else scaled_huber(factor),

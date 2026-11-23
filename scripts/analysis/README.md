@@ -21,6 +21,8 @@ Moved here from `scripts/` on 2026-11-19; diary entries before that date use the
 | `check_quaternion_sign.py` | Is the action quaternion sign consistent across episodes? | decision 10-20 → `--canonical-quaternion` |
 | `check_repeat_batches.py` | `--val-every`: does `.repeat()` give the same batches as plain passes? | diary 11-16 |
 | `check_val_every_weights.py` | `--val-every`: weights bitwise identical to a normal run after epoch 1? | diary 11-16 |
+| `check_wm_balance_equivalence.py` | (c): the balancing `train_step` vs Keras' on CPU: level 1 (Keras' step in the subclass) bitwise, level 2a (split vs combined gradient at step 0) ≤ 1e-5, level 2b (20 steps through the split path) ≤ 2× a 1-ulp control | — (experiment c, 11-23; diary entry to come) |
+| `check_wm_balance_push.py` | (c): for a `--wm-balance` run, the realised push of each balanced term at the best check on fresh train / val batches (mean, median, of means, Σ); band 0.2–0.45 (×ρ/0.3) on train | — (experiment c, 11-23; diary entry to come) |
 | `check_wm_off_gradient.py` | E6: with both WM weights at 0, no gradient reaches the encoder from the WM heads | decision 10-20 (E6) |
 
 ## Inspections (`look_*`): what do the data or the runs show?

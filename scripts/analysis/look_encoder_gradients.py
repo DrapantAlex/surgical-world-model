@@ -33,6 +33,7 @@ import tensorflow as tf
 from tensorflow import keras
 
 from models import data
+from models.balance import encoder_model
 from models.run_config import (OUTPUTS, build_model, dataset_root, episodes_for, loss_weights,
                                run_history, run_keep_ranges, run_quat_ref, save_json)
 
@@ -46,14 +47,7 @@ OUTPUT_OF = {"actor": "action_output", "state": "next_state_output", "image": "n
 ZERO_STATE_REASON = "state_change is zero-initialised (--state-skip): no gradient reaches the encoder"
 
 
-# --- B: the encoder variables, without relying on layer names ---
-def encoder_model(model):
-    """image_input -> encoded_img as a sub-model sharing the layers (and variables) of `model`.
-    encoded_img = the first input of the actor's Concatenate (swm.py C). Keras builds this
-    sub-model only if the output depends on image_input alone, so it holds exactly the encoder."""
-    concat = next(l for l in model.layers if isinstance(l, keras.layers.Concatenate))
-    return keras.Model(model.get_layer("image_input").output, concat.input[0])
-
+# --- B: the encoder variables (encoder_model: models/balance.py, shared with training) ---
 def encoder_layers(enc):
     """[(layer name, [variables])] of the encoder's trainable layers, in graph order."""
     return [(l.name, list(l.trainable_variables)) for l in enc.layers if l.trainable_variables]

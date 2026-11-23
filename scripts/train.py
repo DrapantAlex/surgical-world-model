@@ -21,6 +21,8 @@ The test split is never loaded.
                                               # only the kept frames (pairs + statistics)
   python -m scripts.train ... --val-every 500 # one check (full val) every 500 train batches
   python -m scripts.train ... --history       # + [Δs(t), Δa(t-1)] as input to both branches
+  python -m scripts.train ... --wm-balance 0.3 --wm-state-groups kuka_joint_pos
+                                              # (c): each WM term's encoder push held at 0.3 x the actor's
 """
 import argparse
 import json
@@ -34,6 +36,7 @@ import wandb
 from tensorflow import keras
 
 from models import data, metrics
+from models.balance import WMBalanceTrace
 from models.callbacks import (CheckMonitor, ConstantLogs, EpochTimer, StateGroupLogs,
                               TrainingProgress, WandbLogger, timeline_callback)
 from models.encoders import ENCODERS
@@ -153,8 +156,8 @@ def parse_args():
         unknown = set(args.wm_state_groups) - set(groups)
         if unknown:
             p.error(f"--wm-state-groups: {sorted(unknown)} not in this dataset's groups {list(groups)}")
-        if not args.eval_only:   # REMOVED in the next commit, with the balancing train_step
-            p.error("--wm-balance: the balancing train_step comes in the next commit")
+        if not args.eval_only:   # REMOVED once check e (check_wm_balance_push) has passed
+            p.error("--wm-balance: the controller is not enabled yet (pending check e)")
     elif args.wm_state_groups is not None:
         p.error("--wm-state-groups needs --wm-balance")
     if args.w_next_state is None:
@@ -306,6 +309,12 @@ def train(args):
     print(f"run {run_name}: {cfg['params_total']:,} parameters "
           f"({cfg['params_trainable']:,} trainable), {cfg['n_train_pairs']} train pairs, "
           f"{cfg['n_val_pairs']} val pairs")
+    if args.wm_balance:   # NEW (c)
+        wb = stats["wm_balance"]
+        print(f"--wm-balance {args.wm_balance}: balanced {list(model.bal_terms)} (others: "
+              f"history-run weights), state groups {args.wm_state_groups}, measured every "
+              f"{args.wm_balance_every} steps; references image {wb['image_copy_mse']:.4g}, "
+              f"state {wb['state_copy_mse']:.4g}")
 
     run = wandb.init(project=WANDB_PROJECT, name=run_name, config=cfg, mode=args.wandb_mode)
     callbacks = [
@@ -324,11 +333,16 @@ def train(args):
         timeline_callback(val, run, log_dir, vis_every_checks, root),
         WandbLogger(run),
     ]
+    if args.wm_balance:   # NEW (c): per-measurement trace; stop on NaN (the only automatic stop)
+        callbacks += [WMBalanceTrace(out / "wm_balance_trace.csv", model.bal_terms),
+                      keras.callbacks.TerminateOnNaN()]
     t0 = time.time()
     history = model.fit(train_ds, validation_data=val_ds, epochs=max_checks,
                         steps_per_epoch=args.val_every,   # None = one full pass per "epoch"
                         callbacks=callbacks, verbose=2)
     train_time_min = (time.time() - t0) / 60
+    if args.wm_balance:   # NEW (c): the controller at the END (at the best check: history.csv)
+        cfg["wm_balance_final"] = model.controller_state()
 
     # --- D: evaluate the BEST weights with the same metrics as the baselines ---
     model.load_weights(str(out / "best.weights.h5"))
@@ -366,6 +380,11 @@ def train(args):
                                 "state_delta": args.state_delta, "state_skip": args.state_skip,
                                 "state_layers": args.state_layers,
                                 "wm_mixer_blocks": args.wm_mixer_blocks,
+                                "wm_balance": args.wm_balance,   # NEW (c)
+                                "wm_balance_terms": (",".join(args.wm_balance_terms)
+                                                     if args.wm_balance else None),
+                                "wm_state_groups": (",".join(args.wm_state_groups)
+                                                    if args.wm_balance else None),
                                 "chunk": args.chunk, "history": args.history,
                                 "keep_ranges": Path(args.keep_ranges).name if args.keep_ranges else None,
                                 "epochs": cfg["epochs_run"],
