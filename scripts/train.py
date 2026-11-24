@@ -96,7 +96,8 @@ def parse_args():
                    help="(c): WM losses ÷ their train copy references, and each WM term's weight "
                         "adapted so its push on the encoder stays at RHO x the actor's (off by default)")
     p.add_argument("--wm-balance-terms", type=lambda v: v.split(","), default=["image", "state"],
-                   help="(c): the balanced WM terms, comma-separated (the others get weight 0)")
+                   help="(c): the balanced WM terms, comma-separated (the others keep their "
+                        "history-run term: state MSE x 1.0 on all dims, image MSE x 0.1)")
     p.add_argument("--wm-state-groups", type=lambda v: v.split(","), default=None,
                    help="(c): state groups (data.state_groups) in the balanced state loss, "
                         "comma-separated; default: all (STAR-IL: kuka_joint_pos)")

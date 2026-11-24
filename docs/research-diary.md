@@ -1395,9 +1395,32 @@ Test 3 in detail: 101 weight states, the fixed batch set, (a) WM weights frozen,
 |---|---|---|---|---|
 | smoke-wm-balance-controller-rho03 | 10 | 0.237 / 0.234 | 0.210 / 0.212 | **PASS** (near the lower edge) [M] |
 
+### N = 7 vs N = 10: aliasing not confirmed
+
+Controller run `smoke-wm-balance-controller-rho03-n7` (the same as the N = 10 run, `--wm-balance-every 7`), check e on its best checkpoint (step 500). [M]
+
+| check e (ratio of time means / time-mean push) | N = 10 | N = 7 |
+|---|---|---|
+| image | 0.237 / 0.234 | 0.228 / 0.223 |
+| state | 0.210 / 0.212 | **0.163** / 0.166 |
+| w_state over the 100-step window | 0.028 → 0.044 (+56 %) | 0.058 → 0.081 (+41 %) |
+| verdict | PASS | **FAIL** (state below 0.2) |
+
+- **N = 7 does not move the push toward ρ:** image −4 % (within the ≈ 12 % SE), state −22 % (≈ 2 SE, lower). The +18 % phase effect at N = 10 (≈ 1 SE) was probably noise. [M]
+- The two runs diverge from step 7 on (different measurement schedules): at step 500 their weights differ 3× (w_image 0.00075 vs 0.00232). One window per run cannot separate the schedule from the trajectory. [M]
+- **The under-push in both runs is attributed to EMA lag while the weights climb [H].** Within the window w_state still rises 41–56 %; the EMA's time constant is N / (1 − β) = 70–100 steps. For N = 10, a drift of ≈ 0.5 %/step gives ≈ 40 % lag, i.e. ρ / 1.4 ≈ 0.21, the measured value; for N = 7 the fit is worse.
+- **Expected smaller at full scale [H]:** these runs have 20 episodes (227 batches per epoch); a full run has 4,582, so each step changes the model ≈ 20× less.
+- **Decision: screening with N = 10.** It passed check e, and it is the "every 10 steps" of my five lines.
+
+### Pre-registration: check e on every screening run
+
+- Each screening run gets check e (replay window, band 0.2–0.45 × ρ / 0.3) on its own best checkpoint.
+- **A run outside the band is reported, but marked "controller not held", and does not count as evidence for or against ρ.**
+
 ### Next steps
 
-- [ ] Controller run with N = 7 (new name), then check e on it. If the push moves toward 0.3, the aliasing is confirmed. Screening uses `--wm-balance-every 7`.
+- [x] Controller run with N = 7, then check e on it: FAIL (state 0.163); aliasing not confirmed; screening with N = 10.
+- [ ] `pipeline.index_batches`, so check e can skip ≈ 100k batches by indices (7 s instead of ≈ 61 min per run); verify batch equality across epoch boundaries, the smoke run and check_eval_unchanged.
 - [ ] Equivalence rerun with the new 2b criterion (≤ 2× the 1-ulp control).
 - [ ] Remove the guard once check e passes, then check f (step time), then the 5 screening runs.
 - [ ] Later: the image-gradient oscillation in a WM-on history-style run **without** balancing (a diagnostic trace flag).

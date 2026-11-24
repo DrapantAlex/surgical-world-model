@@ -193,7 +193,8 @@ def prepare_stats(root, out, canonical_quaternion=False, keep_ranges_path=None, 
     None when the option is off.
     NEW (c) wm_balance_groups = [state group names] (--wm-balance): + stats["wm_balance"], the
     copy references of the balanced WM losses, from the FULL train split's pairs with frames
-    (memory-mapped cache, also in smoke runs, like the norm stats; ≈ 2 min on STAR-IL)."""
+    (memory-mapped cache, also in smoke runs, like the norm stats; 382 s on STAR-IL, measured
+    2026-11-23)."""
     root = Path(root)
     train_eps, _ = data.drop_missing_videos("train", data.get_split_episodes("train", root),
                                             root=root, verbose=False)
