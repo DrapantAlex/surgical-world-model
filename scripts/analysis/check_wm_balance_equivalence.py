@@ -4,7 +4,11 @@ On CPU, deterministic ops, the history run's configuration (2 train episodes, th
 statistics), the same initial weights and the same 20 batches, against the plain model:
   level 1  mode "fixed_compiled" (Keras' train_step, copied): every weight after 20 steps
            identical (tolerance 0.0) -> the subclass, its tape, optimizer step and metrics
-           are Keras' own.
+           are Keras' own; and each step's logged loss within 1 float32 ulp of the plain
+           model's. Not "identical": the logged loss VALUE is a separate forward-pass sum whose
+           order can vary between graph builds (11-24: 1 ulp at 2 of 20 steps, weights still
+           0.0); it does not feed the gradient (backprop starts from dL/dL = 1), so the
+           weights are the strict test.
   level 2  mode "fixed_split" (the balancer's split path on every step, weights frozen at the
            history-run values 1.0 / 0.1, state on all dims, references 1):
            (a) step 0, before any update: the summed split gradient vs the combined gradient
@@ -96,9 +100,11 @@ def main():
     d0 = max_weight_diff(fc, fresh)
     loss_fc = train(fc, xb)
     d1 = max_weight_diff(fc, plain)
+    ulps = [abs(a - b) / float(np.spacing(np.float32(max(abs(a), abs(b)))))
+            for a, b in zip(loss_fc, loss_plain)]
     print(f"level 1: initial weights max |Δw| = {d0} ; after {N_STEPS} steps max |Δw| = {d1} "
-          f"(must be 0.0); losses identical: {loss_fc == loss_plain}")
-    ok &= d0 == 0.0 and d1 == 0.0 and loss_fc == loss_plain
+          f"(must be 0.0); logged losses: max {max(ulps):.0f} float32 ulp (must be <= 1)")
+    ok &= d0 == 0.0 and d1 == 0.0 and max(ulps) <= 1.0
 
     # level 2a: step 0, the summed split gradient vs the combined gradient of the compiled loss
     fs = make(cfg, stats, "fixed_split", state_dim)

@@ -1348,6 +1348,8 @@ Success criteria (D2): best val ÷ stand-still **< 0.548** (outside both history
 
 **Level 2b of the equivalence check had a wrong bound.** 20 steps through the split path vs the plain model differ by max |Δw| 1.2·10⁻³, but **a control (the plain model with its loss × (1 + 2⁻²³), ≈ 1 ulp per gradient) differs by 1.1·10⁻³**. Adam turns any rounding change into differences of up to ≈ lr, so no fixed bound like 10⁻⁶ can be met. New criterion: ≤ 2× the control, plus the step-0 gradient comparison (≤ 10⁻⁵). [M]
 
+**Level 1 now allows 1 ulp in the logged loss.** In the rerun the weights were again bit-identical after 20 steps (0.0), but the logged loss differed by 1 float32 ulp (5.96·10⁻⁸) at 2 of 20 steps, while plain vs plain was identical. The loss *value* is a separate forward-pass sum whose order can vary between graph builds, and it doesn't feed the gradient (backprop starts from ∂L/∂L = 1). So the weights are the strict test, and the logged losses must agree within 1 ulp. Rerun: level 1 0.0 / ≤ 1 ulp, 2a 1.0·10⁻⁷, 2b 1.14× the control → **pass**. [M]
+
 **Two design corrections before coding:**
 - **(5a)** A term without a measurement keeps its raw history-run weight. Normalised 1.0 would be raw ≈ 73,000 for the state, pushing up to ~400× the actor and inflating Adam's second moment.
 - **Every step is measured while a term is uninitialised.** The state's gradient is exactly 0 at step 0, so the state initialises at step 1.
