@@ -1296,3 +1296,106 @@ Train vs val over training (seed means, ÷ stand-still):
 - [ ] A WM that actually acts: balance the WM losses to the actor (e.g. normalise by copy_frame / copy_state, or larger weights). Does it shrink the 0.73 memorisation gap? Design options to be written up before any code.
 - [ ] Step (1), paused: `check_orientation_error` for chunk runs, so that `compare_runs` gives the episode bootstrap CI and the paired test for B vs history.
 - [ ] Ask Michael: is "state-only + history = 0.50× stand-still" the bar the encoder must beat from now on?
+
+---
+
+## 2026-11-24
+
+Tags: **[M]** = measured on my files, **[H]** = hypothesis (not tested).
+
+### Today in five lines
+
+- **The image term's push on the encoder oscillates with the weights:** on a FIXED set of batches, ‖g_image‖ swings 43× within 100 steps (CV 0.69, period ≈ 4–5 steps). It does the same with the WM weights frozen, so it is **intrinsic**, not caused by the controller. [M]
+- So the first version of check e (one frozen weight state, 20 batches) measured one point of an oscillating quantity: image push 0.10 / state 0.17, against ≈ 0.3 in the controller's own windows. [M]
+- Ruled out as causes (tests 1–2): the code path (identical norms), TF32 (0.1 %), the checkpoint (the val image loss matches history.csv), the training batches and staleness. [M]
+- **New check e = a replay window** from the best checkpoint (weights + Adam state), 100 steps with the controller active. With N = 10: image 0.237, state 0.210 → **PASS** (band 0.2–0.45). [M]
+- The period ≈ 5 is a factor of N = 10, so the controller may sample one phase (+18 %, ≈ 1 SE: suspected, not established). Screening will use N = 7; an N = 7 controller run tests it.
+
+### Background (11-23, not yet in the diary)
+
+**Encoder gradient shares** (`look_encoder_gradients`, 3 WM-on history seeds, 20 val + 20 train batches, Σ over the batches; mean [min, max]). [M]
+
+| | untrained, val | best, val | best, train |
+|---|---|---|---|
+| 1.0·‖g_state‖ / ‖g_a‖ | 0 (state_change zero-initialised) | 0.0017 [0.0005, 0.0031] | 0.0013 |
+| 0.1·‖g_image‖ / ‖g_a‖ | 0.00006 | 0.0036 [0.0018, 0.0070] | 0.0023 |
+| ‖g − g_a‖ / ‖g_a‖ (the WM's bend of the update) | 0.00006 | 0.0051 | 0.0025 |
+| cos(g_a, g_state) | undefined | +0.32 | **+0.80** [0.67, 0.92] |
+| cos(g_a, g_image) | +0.25 | +0.16 | −0.04 [−0.65, +0.44] |
+
+- The WM changes the encoder's update by ≤ 0.5 % (0.006 % at the start): **"WM on" was effectively "WM off"** (11-23, WM off = WM on). [M]
+- The state push points with the actor; the image push has no consistent direction. [M]
+- The image share drifts ≈ 50× between the start and the best check, so no fixed weight can balance it. [M]
+
+### Experiment (c): my five lines (written before any screening run)
+
+| | |
+|---|---|
+| Question | Does a world model whose push on the shared encoder is held at a chosen share (ρ) of the actor's push make the actor better and memorise less? |
+| Hypothesis | The WM had no effect only because it was too weak (≤ 0.5 % of the push). The KUKA state task uses the same information as the actor (cos +0.80), so a stronger state push should steer the encoder towards motion features and slow memorisation. The image's effect is uncertain |
+| Prediction | ρ = 0.3 brings the actor below 0.548× stand-still and moves the best check later; state-only helps more than image-only; ρ = 1.0 starts to hurt |
+| Surprise | No ρ changes the actor, or the image-only run helps the most |
+| Change | WM losses ÷ train copy references (state = KUKA only); WM weights adapted every N steps to hold each term's push at ρ; the rest as in the history runs |
+
+Success criteria (D2): best val ÷ stand-still **< 0.548** (outside both history ranges), ideally ≤ 0.501 (state-only); a later best check and a smaller train/val gap. Screening: ρ = 0.1 / 0.3 / 1.0 (both terms), ρ = 0.3 image only, ρ = 0.3 state only; seed 0, `--epochs 40`.
+
+### Code so far
+
+| Commit | What | Checks |
+|---|---|---|
+| `21454b0` | `--wm-balance` flags; train copy references in `norm_stats.json` (copy_frame 6.12·10⁻⁴, KUKA copy_state 1.37·10⁻⁵) | existing norm-stats keys identical to the history run; check_eval_unchanged UNCHANGED |
+| `687e0c1` | `models/balance.py`: the balancing `train_step` (closed form w_k = ρ·EMA‖g_a‖ / EMA‖g_k‖, β 0.9, cap 10⁴); the controller is still blocked by a guard | level 1 bitwise (0.0); level 2a step-0 gradient 1.0·10⁻⁷; smoke runs; UNCHANGED |
+
+**Level 2b of the equivalence check had a wrong bound.** 20 steps through the split path vs the plain model differ by max |Δw| 1.2·10⁻³, but **a control (the plain model with its loss × (1 + 2⁻²³), ≈ 1 ulp per gradient) differs by 1.1·10⁻³**. Adam turns any rounding change into differences of up to ≈ lr, so no fixed bound like 10⁻⁶ can be met. New criterion: ≤ 2× the control, plus the step-0 gradient comparison (≤ 10⁻⁵). [M]
+
+**Two design corrections before coding:**
+- **(5a)** A term without a measurement keeps its raw history-run weight. Normalised 1.0 would be raw ≈ 73,000 for the state, pushing up to ~400× the actor and inflating Adam's second moment.
+- **Every step is measured while a term is uninitialised.** The state's gradient is exactly 0 at step 0, so the state initialises at step 1.
+
+### Why check e failed, and the oscillation
+
+Controller run: `smoke-wm-balance-controller-rho03` (20 episodes, ρ = 0.3, N = 10, ≈ 2,000 steps); its best check is 2 (step 500). [M]
+
+| Test | Question | Result |
+|---|---|---|
+| 0 | Is the controller consistent with itself? | Windows of 20 measurements: image 0.19–0.36, state 0.21–0.32 → yes; check e's 0.10 / 0.17 lies outside that noise |
+| 1a | Is the checkpoint the one the controller trained? | Val image loss 0.0319 vs 0.0321 in history.csv → yes |
+| 1b | Code path, TF32? | Both paths give identical norms on one batch; TF32 changes them by 0.1 % → neither |
+| 1b′ | Which norm differs? | At the checkpoint, ‖g_a‖ matches the training-time distribution (0.94×), but **‖g_image‖ is 2.4× smaller** (median 21 vs 51) |
+| 2a | Graph (`tf.cond` in `train_step`) vs eager? | ≤ 0.5 % per batch → no |
+| 2b | The real training batches (stream rebuilt, batches 500–519)? | ‖g_image‖ 22.4 = check e's 21.5 → no. Alignment: batch 500 reproduces the trace (31.33 vs 31.41) |
+| 2c | Staleness (batches just trained on vs seen an epoch ago)? | 23.1 vs 22.4 vs 21.5 random → no |
+| **3** | **Do the norms change with the weights?** | Resumed from θ₅₀₀ (Adam restored, 58 variables, iterations 500), 100 steps on the real stream; norms after each step on a fixed set of 10 batches → **yes** |
+
+Test 3 in detail: 101 weight states, the fixed batch set, (a) WM weights frozen, (b) controller active. [M]
+
+| | (a) frozen: range, max/min, CV | (b) controller: range, max/min, CV | autocorrelation < 0 at lag; first peak |
+|---|---|---|---|
+| ‖g_a‖ | 0.13–0.24, 1.8×, 0.12 | 0.13–0.24, 1.8×, 0.12 | 8; ~15–29 |
+| **‖g_image‖** | **5.5–235, 43×, 0.69** | **6.0–226, 38×, 0.66** | **3; 4–5** |
+| ‖g_state‖ | 0.57–1.66, 2.9×, 0.24 | 0.54–2.21, 4.1×, 0.33 | 4–7; — |
+| time-mean push image / state | 0.226 / 0.143 | 0.235 / 0.210 | |
+
+- **The oscillation is intrinsic:** it is the same size with the WM weights frozen. [M]
+- **It is fast:** period ≈ 4–5 steps. β = 0.9 (≈ 100 steps ≈ 20 periods) is fine for the mean. [M]
+- **The replay is faithful:** the replayed controller measurements match the original trace (step 500 exactly; later within a few %). [M]
+- **EMA lag:** at θ₅₀₀, w_state was ≈ 1.6× below its target; the controller raised it 0.028 → 0.045 within 100 steps. [M]
+- **Possible aliasing:** the steps the controller samples (step % 10 = 0) read ‖g_image‖ ≈ 18 % above the all-steps mean (65.9 vs 55.8; ≈ 1 SE). It would make the controller under-push the image. [H]
+- **[H]:** a gradient norm swinging 40× within 5 steps under Adam suggests the decoder–encoder pair runs at the edge of stability. This is also a candidate cause of the image head staying ≈ 4× worse than copy_frame. Whether it happens without balancing is not measured yet: the history runs logged no trace.
+
+### New check e (`check_wm_balance_push`, replay window)
+
+- **How it works:** resume at the best checkpoint (weights, Adam and controller state, all verified), then 100 steps on the real training stream with the controller active (alignment verified against the trace), and eager norms on 10 fixed train batches before every step.
+- **PASS statistic:** the ratio of time means, mean_t(w·‖g_k‖) / mean_t(‖g_a‖), in **0.2–0.45 (ρ × [0.67, 1.5], fixed before the data)**. The time mean of the per-step push is reported too.
+- **The band's margin:** per-step CV 0.63 and decorrelation within ≈ 3 steps give ≈ 30 effective samples per window, so SE ≈ 12 % and 2 SE ≈ 25 %, plus EMA lag and aliasing.
+
+| run | N | image: ratio of time means / time-mean push | state | verdict |
+|---|---|---|---|---|
+| smoke-wm-balance-controller-rho03 | 10 | 0.237 / 0.234 | 0.210 / 0.212 | **PASS** (near the lower edge) [M] |
+
+### Next steps
+
+- [ ] Controller run with N = 7 (new name), then check e on it. If the push moves toward 0.3, the aliasing is confirmed. Screening uses `--wm-balance-every 7`.
+- [ ] Equivalence rerun with the new 2b criterion (≤ 2× the 1-ulp control).
+- [ ] Remove the guard once check e passes, then check f (step time), then the 5 screening runs.
+- [ ] Later: the image-gradient oscillation in a WM-on history-style run **without** balancing (a diagnostic trace flag).
