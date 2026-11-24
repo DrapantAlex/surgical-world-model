@@ -156,8 +156,6 @@ def parse_args():
         unknown = set(args.wm_state_groups) - set(groups)
         if unknown:
             p.error(f"--wm-state-groups: {sorted(unknown)} not in this dataset's groups {list(groups)}")
-        if not args.eval_only:   # REMOVED once check e (check_wm_balance_push) has passed
-            p.error("--wm-balance: the controller is not enabled yet (pending check e)")
     elif args.wm_state_groups is not None:
         p.error("--wm-state-groups needs --wm-balance")
     if args.w_next_state is None:
