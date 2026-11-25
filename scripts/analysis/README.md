@@ -48,6 +48,12 @@ Moved here from `scripts/` on 2026-11-19; diary entries before that date use the
 |---|---|---|
 | `plot_step1_summary.py` | Step 1 (1a, 1b, 1c) curves from `history.csv`: KUKA ÷ copy, image ÷ copy_frame, actor Huber → `outputs/analysis/step1_summary/` | — (notes, step 1) |
 
+## Reports (`report_*`): generated documentation
+
+| Script | What it does | Supports |
+|---|---|---|
+| `report_data.py` | Data card of one run (default: history seed 0): every input, target and output with raw source and units, raw and final values per dim, each transformation with file:line and its train-only statistics, a float32-exact check of every formula against `get_pairs`, one worked example pair, and the measured prediction ranges. Tables: full train + val (no frames); images and predictions: first N episodes → `docs/data-card.md`, `docs/data-card/*.png` | — (data card, 11-25) |
+
 ## Shared code
 
 Some scripts import from others; move or rename them together:
